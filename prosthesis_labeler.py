@@ -1,545 +1,603 @@
 import json
-import os
-import csv
-from collections import defaultdict
-from pathlib import Path
-
 import tkinter as tk
 from tkinter import messagebox, filedialog
-from PIL import Image, ImageTk, ImageDraw  # 引入 ImageDraw 用于画框
+from collections import defaultdict
+from pathlib import Path
+from typing import List, Tuple, Dict
 
-WINDOW_WIDTH = 1400  # 稍微加宽一点以容纳更宽的按钮和左侧列表
-WINDOW_HEIGHT = 900  # 稍微加高一点
-
-
-def load_annotations(json_path):
-    with open(json_path, "r", encoding="utf-8") as f:
-        data = json.load(f)
-
-    # 既兼容 COCO 格式（data["annotations"]），也兼容“纯列表”格式
-    if isinstance(data, dict) and "annotations" in data:
-        return data["annotations"], data.get("images", None)
-    elif isinstance(data, list):
-        return data, None
-    else:
-        raise ValueError("不认识的 JSON 格式，请检查标注文件。")
+from PIL import Image, ImageTk, ImageDraw
 
 
-def load_existing_label_infos(label_path: Path):
-    _, image_info_list = load_annotations(label_path)
-    return image_info_list
+class Config:
+    """
+    Config class. Set window size, keypoint name and colors for anaotation display
+    """
+    WINDOW_WIDTH = 1400
+    WINDOW_HEIGHT = 900
+
+    KEYPOINTS = {
+        1: 'Above right elbow residual limb end',
+        2: 'Below right elbow residual limb end',
+        3: 'Above left elbow residual limb end',
+        4: 'Below left elbow residual limb end',
+        5: 'Above right knee residual limb end',
+        6: 'Below right knee residual limb end',
+        7: 'Above left knee residual limb end',
+        8: 'Below left knee residual limb end',
+        9: 'Left prosthetic elbow',
+        10: 'Right prosthetic elbow',
+        11: 'Left prosthetic knee',
+        12: 'Right prosthetic knee',
+        13: 'Left prosthetic wrist',
+        14: 'Right prosthetic wrist',
+        15: 'Left prosthetic ankle',
+        16: 'Right prosthetic ankle',
+    }
+
+    COLORS = {
+        1: '#FF0000', 2: '#00FF00', 3: '#0000FF', 4: '#FFFF00',
+        5: '#FF00FF', 6: '#00FFFF', 7: '#FFA500', 8: '#800080',
+        9: '#A52A2A', 10: '#FFC0CB', 11: '#808000', 12: '#008080',
+        13: '#000080', 14: '#FFD700', 15: '#DC143C', 16: '#4B0082',
+    }
 
 
-def load_LD_labels(label_path: Path):
-    annotations, image_info_list = load_annotations(label_path)
-    return annotations, image_info_list
+class DataManager:
+    """
+    DataManager class to manage any data which will be used in the annotation process or generated during annotation
+    processes.
+    """
+
+    def __init__(self):
+        self.ld_label_path = None
+        self.output_label_path = None
+        self.image_dir = None
+
+        # core data
+        self.all_image_ids = []  # sorted id list to be processed
+        self.ld_data_map = {}  # {image_id: (img_info, ld_annotations_list)}
+        self.saved_anns_map = defaultdict(list)  # {image_id: [saved_annotations]}
+        self.finished_ids = set()
+
+    def set_paths(self, ld_path, out_path, img_dir):
+        """
+        Setting paths for annotation process.
+
+        Args:
+            ld_path: LDpose's annotation path
+            out_path: The path to save the new annotation file
+            img_dir: The path to read images
+
+        Returns:
+            None
+        """
+        self.ld_label_path = ld_path
+        self.output_label_path = out_path
+        self.image_dir = img_dir
+
+    def load_data(self):
+        """
+        Retrieve data from the saved path
+
+        Returns:
+            None
+        """
+        # Load original annotation
+        ld_anns, ld_imgs = self._load_json(self.ld_label_path)
+        if not ld_imgs:
+            return False
+
+        # LD data by id
+        self.ld_data_map = {}
+
+        temp_ld_anns = defaultdict(list)
+        for ann in ld_anns:
+            temp_ld_anns[ann.get("image_id")].append(ann)
+
+        for img in ld_imgs:
+            img_id = img['id']
+            if img_id in temp_ld_anns:
+                self.ld_data_map[img_id] = (img, temp_ld_anns[img_id])
+
+        self.all_image_ids = sorted(list(self.ld_data_map.keys()))
+
+        # Load the saved new annotation to resume
+        saved_anns_list, saved_imgs_list = self._load_json(self.output_label_path)
+        self.saved_anns_map = defaultdict(list)
+        for ann in saved_anns_list:
+            self.saved_anns_map[ann['image_id']].append(ann)
+
+        self.finished_ids = {img['id'] for img in (saved_imgs_list or [])}
+        return True
+
+    def _load_json(self, path) -> Tuple[List, List]:
+        """
+        Load annotation from JSON file
+        Args:
+            path: path to the JSON file
+
+        Returns:
+            List of images Infos
+            List of Annotations
+        """
+        if not path or not path.exists():
+            return [], []
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict) and "annotations" in data:
+                return data["annotations"], data.get("images", [])
+            return [], []
+        except Exception:
+            return [], []
+
+    def get_next_todo_index(self) -> int:
+        """
+        Return the index of the next id
+
+        Returns:
+            ID number
+        """
+        for i, img_id in enumerate(self.all_image_ids):
+            if img_id not in self.finished_ids:
+                return i
+        return len(self.all_image_ids) - 1 if self.all_image_ids else 0
+
+    def get_image_context(self, index: int) -> Dict | None:
+        """
+        Retrieve all context for an image
+        Args:
+            index: The ID of an image.
+
+        Returns:
+            A dict including id, name, path, LD annotations, previous saved annotations and index string.
+        """
+        if index < 0 or index >= len(self.all_image_ids):
+            return None
+
+        current_id = self.all_image_ids[index]
+        img_info, ld_anns = self.ld_data_map[current_id]
+
+        saved_anns = self.saved_anns_map.get(current_id, [])
+
+        return {
+            "id": current_id,
+            "file_name": img_info['file_name'],
+            "full_path": self.image_dir / img_info['file_name'],
+            "ld_anns": ld_anns,
+            "saved_anns": saved_anns,
+            "index_str": f"{index + 1}/{len(self.all_image_ids)}"
+        }
+
+    def save_annotation_result(self, current_id, current_labels_map):
+        """
+        Save the annotation result to the disk
+        Args:
+            current_id: Image ID
+            current_labels_map: The content of Annotation {ann_index: {keypoint_id: [x, y, vis]}}
+
+        Returns:
+            The total number of finished annotations
+        """
+        # 1. Read exist annotation
+        try:
+            with open(self.output_label_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except:
+            data = {"images": [], "annotations": []}
+
+        images = data.get("images", [])
+        annotations = data.get("annotations", [])
+
+        # 2. Filter out the current id's corresponding data
+        images = [img for img in images if img['id'] != current_id]
+        annotations = [ann for ann in annotations if ann['image_id'] != current_id]
+
+        # 3. Retrieve the LD pose annotation of the id.
+        img_info, ld_anns = self.ld_data_map[current_id]
+
+        has_pro = False
+        for person_labels in current_labels_map.values():
+            if any(v[2] != -1 for v in person_labels.values()):
+                has_pro = True
+                break
+
+        out_img_info = img_info.copy()
+        out_img_info["has_pro"] = has_pro
+        images.append(out_img_info)
+
+        # 4. Merge annotation
+        new_saved_cache = []
+
+        if ld_anns:
+            for idx, ann in enumerate(ld_anns):
+                out_ann = ann.copy()
+                if idx in current_labels_map:
+                    person_labels = current_labels_map[idx]
+                    out_ann["new_keypoints"] = dict(person_labels)
+
+                annotations.append(out_ann)
+                new_saved_cache.append(out_ann)
+        else:
+            if 0 in current_labels_map:
+                out_ann = {
+                    "image_id": current_id,
+                    "id": 9000000 + current_id,
+                    "new_keypoints": dict(current_labels_map[0])
+                }
+                annotations.append(out_ann)
+                new_saved_cache.append(out_ann)
+
+        # 5. Write to the file
+        data["images"] = images
+        data["annotations"] = annotations
+
+        with open(self.output_label_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=4)
+
+        # 6. Update memory data
+        self.finished_ids.add(current_id)
+        self.saved_anns_map[current_id] = new_saved_cache
+
+        return len(self.finished_ids)
 
 
-def list_images(image_dir: Path):
-    """递归列出目录下所有图片"""
-    exts = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp"}
-    return sorted([p for p in image_dir.rglob("*") if p.suffix.lower() in exts])
+class ImageVisualizer:
+    """
+    The ImageVisualizer class response for the
+    """
+
+    def render(self, img_path, ld_anns, selected_ann_index, current_labels_map):
+        """
+        img_path: Image path
+        ld_anns: LDpose annotations
+        selected_ann_index: The index of the selected annotations
+        current_labels_map: The current image's annotation {ann_idx: {kp_id: [x,y,v]}}
+        """
+        try:
+            img = Image.open(img_path).convert("RGB")
+        except Exception as e:
+            print(f"无法打开图片: {img_path}, Error: {e}")
+            return None
+
+        draw = ImageDraw.Draw(img)
+
+        # 1. Draw bbox based on the LDpose annotation
+        if ld_anns:
+            if 0 <= selected_ann_index < len(ld_anns):
+                target_ann = ld_anns[selected_ann_index]
+                if "bbox" in target_ann:
+                    x, y, w, h = target_ann["bbox"]
+                    draw.rectangle([x, y, x + w, y + h], outline="red", width=3)
+                    draw.text((x, y - 15), f"ID: {target_ann.get('id')}", fill="red")
+
+        # Drawing the keypoints
+        current_person_labels = current_labels_map.get(selected_ann_index, {})
+
+        r = 4
+        for key_id, val in current_person_labels.items():
+            if not isinstance(val, (list, tuple)) or len(val) < 3:
+                continue
+
+            kx, ky, kv = val
+            if kx != -1 and ky != -1:
+                color = Config.COLORS.get(key_id, 'white')
+                draw.ellipse([kx - r, ky - r, kx + r, ky + r], fill=color, outline='black')
+                draw.text((kx + r + 2, ky - r), str(kv), fill=color, stroke_fill="black", stroke_width=1)
+
+        return ImageTk.PhotoImage(img)
 
 
 class ProsthesisLabelerApp:
-    """
-    三分类标注：
-    2 = 带假肢，连接点可见
-    1 = 带假肢，衣物遮挡
-    0 = 无假肢
-    """
-
     def __init__(self, master):
-        self.selected_keypoint_id = None
-
-        # === 核心数据结构更改 ===
-        # self.all_current_labels: 存储当前图片中所有人的标注
-        # 结构: { annotation_index: defaultdict(lambda: [-1, -1, -1]) }
-        self.all_current_labels = {}
-
-        # self.current_label: 仅仅是一个引用，指向当前选中的那个人的 defaultdict
-        self.current_label = None
-
-        self.current_ann_index = 0  # 记录当前选中的是第几个 annotation
         self.master = master
-        self.master.title("LD-Prosthesis Labeler (3-Class with Resume)")
-        self.master.geometry(f"{WINDOW_WIDTH}x{WINDOW_HEIGHT}")
+        self.master.title("LD-Prosthesis Labeler")
+        self.master.geometry(f"{Config.WINDOW_WIDTH}x{Config.WINDOW_HEIGHT}")
 
-        # ------------------ 用户选择 ------------------
-        self.LD_label_file = self.ask_LD_label_directory()
-        if not self.LD_label_file:
+        self.data_manager = DataManager()
+        self.visualizer = ImageVisualizer()
+
+        self.current_img_index = 0
+        self.selected_ann_index = 0
+        self.selected_keypoint_id = -1
+
+        self.runtime_labels = {}
+
+        if not self._init_paths():
             self.master.destroy()
             return
 
-        self.label_file = self.ask_label_file()
-        if not self.label_file:
+        if not self.data_manager.load_data():
+            messagebox.showerror("错误", "无法加载数据文件。")
             self.master.destroy()
             return
 
-        self.image_dir = self.ask_image_directory()
-        if not self.image_dir:
-            self.master.destroy()
-            return
+        self.current_img_index = self.data_manager.get_next_todo_index()
 
-        # 加载已经标注的标签
-        if self.label_file.exists():
-            self.labels = load_existing_label_infos(self.label_file)
-            self.labels = {label['id']: label for label in self.labels}
-        else:
-            self.labels = {}
-        # 加载LDpose的标签
-        self.LD_annotations, self.LD_image_infos = load_LD_labels(self.LD_label_file)
-        self.LD_labels = {}
-        for LD_image_info in self.LD_image_infos:
-            LD_id = LD_image_info['id']
-            annotations = [annotation for annotation in self.LD_annotations if annotation.get("image_id") == LD_id]
-            # 注意：这里存的是 annotations 列表，而不是单个对象
-            if len(annotations) == 0:
-                continue
-            self.LD_labels[LD_id] = [LD_image_info, annotations]
+        self._setup_ui()
 
-        # 统计数量（自动恢复）
-        self.count_pro = sum(1 for info in self.labels.values() if info.get('has_pro') is True)
-        self.count_no_pro = len(self.labels) - self.count_pro
+        self._load_current_image()
 
-        # 找到第一张未标注的位置
-        self.todo_ids = self.get_todo_ids()
+    def _init_paths(self):
+        ld_path = filedialog.askopenfilename(title="选择 LDPose annotation (.json)", filetypes=[("JSON", "*.json")])
+        if not ld_path: return False
 
-        # ------------------ UI ------------------
-        # 使用 PanedWindow 分隔左右区域
-        self.paned_window = tk.PanedWindow(self.master, orient=tk.HORIZONTAL)
-        self.paned_window.pack(fill=tk.BOTH, expand=True)
+        out_path = filedialog.asksaveasfilename(title="保存 labels.json 位置", initialfile="labels.json",
+                                                defaultextension=".json")
+        if not out_path: return False
 
-        # === 左侧：Annotation 列表 ===
-        self.left_frame = tk.Frame(self.paned_window, width=200, bg="#f0f0f0")
-        self.paned_window.add(self.left_frame)
+        img_dir = filedialog.askdirectory(title="选择图片目录")
+        if not img_dir: return False
 
-        tk.Label(self.left_frame, text="Annotations List", bg="#f0f0f0", font=("Arial", 10, "bold")).pack(pady=5)
+        if not Path(out_path).exists():
+            with open(out_path, "w", encoding="utf-8") as f:
+                json.dump({"images": [], "annotations": []}, f)
 
-        list_frame = tk.Frame(self.left_frame)
+        self.data_manager.set_paths(Path(ld_path), Path(out_path), Path(img_dir))
+        return True
+
+    def _setup_ui(self):
+        """
+        Set up the UI
+        Returns:
+            None
+        """
+        paned = tk.PanedWindow(self.master, orient=tk.HORIZONTAL)
+        paned.pack(fill=tk.BOTH, expand=True)
+
+        # The left window contain a list of annotations of an image
+        left_frame = tk.Frame(paned, width=250, bg="#f0f0f0")
+        paned.add(left_frame)
+
+        tk.Label(left_frame, text="Annotations List", font=("Arial", 10, "bold"), bg="#f0f0f0").pack(pady=5)
+        list_frame = tk.Frame(left_frame)
         list_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
         self.ann_listbox = tk.Listbox(list_frame, font=("Arial", 10), selectmode=tk.SINGLE)
         self.ann_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        self.ann_listbox.bind("<<ListboxSelect>>", self.on_annotation_select)  # 绑定选择事件
+        self.ann_listbox.bind("<<ListboxSelect>>", self._on_ann_list_select)
 
-        scrollbar = tk.Scrollbar(list_frame, command=self.ann_listbox.yview)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        self.ann_listbox.config(yscrollcommand=scrollbar.set)
+        sb = tk.Scrollbar(list_frame, command=self.ann_listbox.yview)
+        sb.pack(side=tk.RIGHT, fill=tk.Y)
+        self.ann_listbox.config(yscrollcommand=sb.set)
 
-        # === 右侧：原本的图片和控制区 ===
-        self.right_frame = tk.Frame(self.paned_window)
-        self.paned_window.add(self.right_frame)
+        # The right window contains image and button
+        right_frame = tk.Frame(paned)
+        paned.add(right_frame)
 
-        # 设置 bd=0 消除边框误差
-        self.image_label = tk.Label(self.right_frame, bd=0, highlightthickness=0)
+        self.image_label = tk.Label(right_frame, bd=0, highlightthickness=0)
         self.image_label.pack(expand=True)
+        self.image_label.bind("<Button-1>", self._on_canvas_click)
 
-        # 当前文件信息
         self.info_var = tk.StringVar()
-        tk.Label(self.right_frame, textvariable=self.info_var).pack(pady=5)
+        tk.Label(right_frame, textvariable=self.info_var).pack(pady=5)
 
-        # 计数信息
         self.counter_var = tk.StringVar()
-        self.update_counter_text()
-        tk.Label(self.right_frame, textvariable=self.counter_var, font=("Arial", 12)).pack()
+        tk.Label(right_frame, textvariable=self.counter_var, font=("Arial", 12)).pack()
 
-        self.keypoints = {
-            1: 'Above right elbow residual limb end',
-            2: 'Below right elbow residual limb end',
-            3: 'Above left elbow residual limb end',
-            4: 'Below left elbow residual limb end',
-            5: 'Above right knee residual limb end',
-            6: 'Below right knee residual limb end',
-            7: 'Above left knee residual limb end',
-            8: 'Below left knee residual limb end',
-            9: 'Left prosthetic elbow',
-            10: 'Right prosthetic elbow',
-            11: 'Left prosthetic knee',
-            12: 'Right prosthetic knee',
-            13: 'Left prosthetic wrist',
-            14: 'Right prosthetic wrist',
-            15: 'Left prosthetic ankle',
-            16: 'Right prosthetic ankle',
-        }
+        self._setup_control_buttons(right_frame)
 
-        # === 定义每个关键点的颜色 ===
-        self.keypoint_colors = {
-            1: '#FF0000',  # Red
-            2: '#00FF00',  # Lime
-            3: '#0000FF',  # Blue
-            4: '#FFFF00',  # Yellow
-            5: '#FF00FF',  # Magenta
-            6: '#00FFFF',  # Cyan
-            7: '#FFA500',  # Orange
-            8: '#800080',  # Purple
-            9: '#A52A2A',  # Brown
-            10: '#FFC0CB',  # Pink
-            11: '#808000',  # Olive
-            12: '#008080',  # Teal
-            13: '#000080',  # Navy
-            14: '#FFD700',  # Gold
-            15: '#DC143C',  # Crimson
-            16: '#4B0082',  # Indigo
-        }
-
-        self.reset()
-
-        # 点击坐标
-        self.image_label.bind("<Button-1>", self.on_image_click)
-
-        # 按钮区域
-        btn_frame = tk.Frame(self.right_frame)
+    def _setup_control_buttons(self, parent):
+        btn_frame = tk.Frame(parent)
         btn_frame.pack(pady=10)
-        for i in range(0, 4):
-            for j in range(0, 4):
-                keypoint_id = i * 4 + j + 1
-                # 获取颜色并设置按钮前景或背景色，方便用户对应
-                color = self.keypoint_colors.get(keypoint_id, 'black')
+
+        # 1. Keypoint buttons
+        for i in range(4):
+            for j in range(4):
+                kp_id = i * 4 + j + 1
+                name = Config.KEYPOINTS[kp_id]
+                color = Config.COLORS.get(kp_id, 'black')
+
                 tk.Button(
                     btn_frame,
-                    text=self.keypoints[keypoint_id],
-                    width=35,  # Changed width to 35 to fit text
-                    fg=color if keypoint_id not in [4, 6, 10] else 'black',  # 浅色背景用黑字，深色用彩字，简单处理
-                    # 或者可以在文字旁加个色块，这里简单起见直接设置文字颜色（除了太浅的黄色等）
-                    command=lambda k=keypoint_id: self.set_target_keypoint(k)
-                ).grid(row=i, column=j, padx=5)
+                    text=name,
+                    width=35,
+                    fg=color if kp_id not in [4, 6, 10] else 'black',
+                    command=lambda k=kp_id: self._set_tool_keypoint(k)
+                ).grid(row=i, column=j, padx=5, pady=2)
 
+        # 2. Visibility buttons
         for i in range(1, 4):
             tk.Button(
-                btn_frame,
-                text=f"Vis {i}",
-                width=18,
-                command=lambda v=i: self.set_vis(v)
-            ).grid(row=5, column=i, padx=5)
+                btn_frame, text=f"Vis {i}", width=18,
+                command=lambda v=i: self._set_tool_vis(v)
+            ).grid(row=5, column=i, padx=5, pady=5)
 
-        tk.Button(
-            btn_frame,
-            text="Clear selected keypoint",
-            width=18,
-            command=self.clear_selected_keypoint
-        ).grid(row=6, column=0, padx=5)
+        # 3. Clear buttons
+        tk.Button(btn_frame, text="Clear selected point", width=18, command=self._clear_current_point).grid(row=6,
+                                                                                                            column=0)
 
-        tk.Button(
-            btn_frame,
-            text="Next",
-            width=18,
-            command=lambda: self.next_image()
-        ).grid(row=6, column=1, padx=5)
+        nav_frame = tk.Frame(btn_frame)
+        nav_frame.grid(row=6, column=1, columnspan=2)
+        tk.Button(nav_frame, text="< Previous", width=15, command=self._prev_image).pack(side=tk.LEFT, padx=5)
+        tk.Button(nav_frame, text="Next >", width=15, command=self._next_image).pack(side=tk.LEFT, padx=5)
 
-        # 打开 label 文件（追加）
-        if not self.label_file.exists():
-            with open(self.label_file, "w", encoding="utf-8") as f:
-                data = {
-                    "images": [],
-                    "annotations": []
-                }
-                json.dump(data, f, ensure_ascii=False, indent=4)
+    def _load_current_image(self):
+        """
+        Load the current image
+        Returns:
+            None
+        """
+        ctx = self.data_manager.get_image_context(self.current_img_index)
+        if not ctx:
+            messagebox.showinfo("完成", "没有更多图片或索引越界。")
+            return
 
-        self.show_image()
-
-    def clear_selected_keypoint(self):
-        if self.selected_keypoint_id in self.current_label:
-            self.current_label[self.selected_keypoint_id] = [-1, -1, -1]
-            # 清除后刷新界面
-            self.render_image_with_bbox()
-
-    def ask_image_directory(self):
-        dirname = filedialog.askdirectory(title="请选择图片目录")
-        return Path(dirname) if dirname else None
-
-    def reset(self):
+        # 1. Reset params
+        self.runtime_labels = {}
         self.selected_keypoint_id = -1
-        self.current_ann_index = 0
+        self.selected_ann_index = 0
 
-        # 重置所有人的标注容器
-        self.all_current_labels = {}
+        # 2. Restore the annotation
+        self._reconstruct_runtime_state(ctx)
 
-        # 初始化第一个人的标注容器，并指向它
-        self._switch_current_label_pointer(0)
+        # 3. Refresh the list
+        self.ann_listbox.delete(0, tk.END)
+        ld_anns = ctx['ld_anns']
 
-    def _switch_current_label_pointer(self, index):
+        if ld_anns:
+            for idx, ann in enumerate(ld_anns):
+                self.ann_listbox.insert(tk.END, f"#{idx} - ID:{ann.get('id')} (Cat:{ann.get('category_id')})")
+            self.ann_listbox.selection_set(0)
+        else:
+            self.ann_listbox.insert(tk.END, "No Annotations (New)")
+            if 0 not in self.runtime_labels:
+                self.runtime_labels[0] = defaultdict(lambda: [-1, -1, -1])
+
+        rel_path = ctx['full_path'].relative_to(self.data_manager.image_dir).as_posix()
+        self.info_var.set(f"{ctx['index_str']} : {rel_path}")
+        self._update_counter()
+
+        self._refresh_canvas()
+
+    def _reconstruct_runtime_state(self, ctx):
         """
-        切换当前操作的 label 指针。
-        如果该 index 的 label 还不存在，则创建一个新的 defaultdict。
+        Reconstruct the state using saved annotation
         """
-        self.current_ann_index = index
-        if index not in self.all_current_labels:
-            self.all_current_labels[index] = defaultdict(lambda: [-1, -1, -1])
+        saved_anns = ctx['saved_anns']
+        ld_anns = ctx['ld_anns']
 
-        # 关键：改变引用指向
-        self.current_label = self.all_current_labels[index]
+        id_to_idx = {ann['id']: i for i, ann in enumerate(ld_anns)}
 
-    def set_vis(self, vis):
-        if self.selected_keypoint_id is None or self.selected_keypoint_id < 0:
-            messagebox.showwarning("提示", "请先选择一个关键点按钮，再设置 Vis。")
-            return
+        for s_ann in saved_anns:
+            if "new_keypoints" not in s_ann: continue
 
-        # 只有当该点已经有坐标时（不为全 -1），我们才允许改 Vis，或者你可以允许先设 Vis
-        # 这里假设: 用户通常是先点坐标，默认 Vis=0/1/2，或者可以改 Vis。
-        # 如果目前是 [-1, -1, -1]，改 Vis 变成 [-1, -1, vis]
-        self.current_label[self.selected_keypoint_id][2] = vis
+            target_idx = None
+            if s_ann.get('id') in id_to_idx:
+                target_idx = id_to_idx[s_ann['id']]
+            elif not ld_anns:
+                target_idx = 0
 
-        # === 立即刷新显示 ===
-        self.render_image_with_bbox()
+            if target_idx is not None:
+                recovered_data = defaultdict(lambda: [-1, -1, -1])
+                for k, v in s_ann["new_keypoints"].items():
+                    recovered_data[int(k)] = v
+                self.runtime_labels[target_idx] = recovered_data
 
-    # ==========================================
-    # 选择文件夹 / 文件
-    # ==========================================
-    def ask_LD_label_directory(self):
-        dirname = filedialog.askopenfilename(
-            title="请选择LDPose的annotation的位置",
-            defaultextension=".json",
-            filetypes=[("JSON 文件", "*.json")]
-        )
-        return Path(dirname) if dirname else None
+        if self.selected_ann_index not in self.runtime_labels:
+            self.runtime_labels[self.selected_ann_index] = defaultdict(lambda: [-1, -1, -1])
 
-    def ask_label_file(self):
-        filename = filedialog.asksaveasfilename(
-            title="请选择 labels.json 保存位置",
-            initialfile="labels.json",
-            defaultextension=".json",
-            filetypes=[("JSON 文件", "*.json")]
-        )
-        return Path(filename) if filename else None
+    def _refresh_canvas(self):
+        """
+        Refresh the canvas to draw the current image and annotation
+        Returns:
+            None
+        """
+        ctx = self.data_manager.get_image_context(self.current_img_index)
+        if not ctx: return
 
-    def get_todo_ids(self):
-        todo_ids = set(self.LD_labels.keys())
-        for label_id in self.labels.keys():
-            todo_ids.discard(label_id)
-        return sorted(list(todo_ids))
-
-    # ==========================================
-    # UI 更新
-    # ==========================================
-    def update_counter_text(self):
-        total = len(self.labels)
-        self.counter_var.set(
-            f"已标注：{total}  |  有假肢：{self.count_pro}   |   无假肢：{self.count_no_pro}"
+        tk_img = self.visualizer.render(
+            ctx['full_path'],
+            ctx['ld_anns'],
+            self.selected_ann_index,
+            self.runtime_labels
         )
 
-    def next_image(self):
-        # 如果 save_result 返回 False (校验失败)，则不进行任何操作
-        if not self.save_result():
-            return
+        if tk_img:
+            self.tk_img_ref = tk_img
+            self.image_label.config(image=tk_img)
 
-        if self.todo_ids:
-            self.todo_ids.pop(0)
-        self.reset()
-        self.show_image()
+    def _validate_before_save(self):
+        """
+        Validate the current image's annotation. If any element is -1, reject to save the annotation.
+        Returns:
 
-    def save_result(self):
-        if not self.todo_ids:
-            return True
-
-        current_id = self.todo_ids[0]
-
-        # === 校验逻辑：在保存前检查完整性 ===
-        # 遍历所有已编辑的人
-        for ann_idx, person_labels in self.all_current_labels.items():
-            # 遍历该人所有的关键点
-            for key_id, val in person_labels.items():
+        """
+        for ann_idx, kps in self.runtime_labels.items():
+            for kp_id, val in kps.items():
                 x, y, v = val
-
-                # 状态判定：
-                # 全空：[-1, -1, -1] -> 合法（未标注）
-                # 全满：[>=0, >=0, >=0] -> 合法（已标注）
-                # 其他：不合法（半成品）
                 is_empty = (x == -1 and y == -1 and v == -1)
                 is_full = (x != -1 and y != -1 and v != -1)
 
                 if not is_empty and not is_full:
-                    kp_name = self.keypoints.get(key_id, f"ID {key_id}")
-                    msg = f"保存失败：\n检测到不完整的标注！\n\n" \
-                          f"人物索引 (List Index): {ann_idx}\n" \
-                          f"关键点: {kp_name}\n" \
-                          f"当前值: {val}\n\n" \
-                          f"请确保坐标 (xy) 和 可见性 (Vis) 都已设置，或者清除该点。"
+                    kp_name = Config.KEYPOINTS.get(kp_id, f"ID {kp_id}")
+                    msg = f"保存失败：标注不完整\n人物#{ann_idx}, 点:{kp_name}, 值:{val}\n请补全或清除。"
                     messagebox.showerror("校验错误", msg)
                     return False
+        return True
 
-        # === 修正：检查所有人是否有标记 ===
-        # 遍历 self.all_current_labels 中的每一个人的标注 dict
-        has_pro = False
-        for person_labels in self.all_current_labels.values():
-            if any(v != [-1, -1, -1] for v in person_labels.values()):
-                has_pro = True
-                break
+    def _save_current(self):
+        """
+        Save the current image's annotation
+        Returns:
+            Boolean: True if the annotation is saved, False otherwise
+        """
+        if not self._validate_before_save():
+            return False
 
-        with open(self.label_file, "r", encoding="utf-8") as f:
-            data = json.load(f)
+        ctx = self.data_manager.get_image_context(self.current_img_index)
+        if not ctx: return True
 
-        images = data.get("images", [])
-        annotations = data.get("annotations", [])
-        existing_ids = {img["id"] for img in images}
+        count = self.data_manager.save_annotation_result(ctx['id'], self.runtime_labels)
+        self._update_counter(saved_count=count)
+        return True
 
-        if current_id not in existing_ids:
-            img_info, anns_list = self.LD_labels[current_id]  # 获取的是一个 list
+    def _update_counter(self, saved_count=None):
+        if saved_count is None:
+            saved_count = len(self.data_manager.finished_ids)
+        self.counter_var.set(f"已保存: {saved_count}")
 
-            # 1. 保存 image_info
-            out_img_info = img_info.copy()
-            out_img_info["has_pro"] = has_pro
-            images.append(out_img_info)
 
-            # 2. 保存 annotations
-            if anns_list and len(anns_list) > 0:
-                # === 修正逻辑：遍历该图所有 Annotation，并分别保存它们的标注 ===
-                for idx, ann in enumerate(anns_list):
-                    out_ann = ann.copy()
+    def _on_ann_list_select(self, event):
+        sel = self.ann_listbox.curselection()
+        if sel:
+            idx = sel[0]
+            if idx != self.selected_ann_index:
+                self.selected_ann_index = idx
+                if idx not in self.runtime_labels:
+                    self.runtime_labels[idx] = defaultdict(lambda: [-1, -1, -1])
+                self._refresh_canvas()
 
-                    # 检查这个 index 是否在我们的标注记录里
-                    if idx in self.all_current_labels:
-                        person_labels = self.all_current_labels[idx]
-                        # 只有当这个 dict 不为空（或者包含了修改）时才保存
-                        # 这里直接转换成 dict 保存
-                        print(f"Saving for annotation index {idx}: {person_labels}")
-                        out_ann["new_keypoints"] = dict(person_labels)
-
-                    # 将处理好的（或未修改的）annotation 加入列表
-                    annotations.append(out_ann)
-
-            else:
-                # 如果原数据里完全没有 annotation，但我们却标注了（比如 index 0），则创建一个新的
-                # 通常这种情况 index 肯定是 0
-                if 0 in self.all_current_labels:
-                    out_ann = {
-                        "image_id": current_id,
-                        "id": len(annotations) + 1,
-                        "new_keypoints": dict(self.all_current_labels[0])
-                    }
-                    annotations.append(out_ann)
-
-            self.labels[current_id] = out_img_info
-
-        data["images"] = images
-        data["annotations"] = annotations
-
-        with open(self.label_file, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=4)
-
-        if has_pro:
-            self.count_pro += 1
-        else:
-            self.count_no_pro += 1
-        self.update_counter_text()
-        return True  # 保存成功
-
-    def show_image(self):
-        if len(self.todo_ids) == 0:
-            messagebox.showinfo("完成", "所有图片已标注完毕！")
-            self.stop_labeling()
+    def _on_canvas_click(self, event):
+        if self.selected_keypoint_id < 0:
+            messagebox.showwarning("提示", "请先选择一个关键点按钮。")
             return
 
-        current_id = self.todo_ids[0]
+        if self.selected_ann_index not in self.runtime_labels:
+            self.runtime_labels[self.selected_ann_index] = defaultdict(lambda: [-1, -1, -1])
 
-        # === 1. 加载并填充 Annotation 列表 ===
-        self.ann_listbox.delete(0, tk.END)  # 清空旧列表
-        _, anns_list = self.LD_labels[current_id]
+        current_points = self.runtime_labels[self.selected_ann_index]
+        current_points[self.selected_keypoint_id][0] = event.x
+        current_points[self.selected_keypoint_id][1] = event.y
 
-        if anns_list:
-            for idx, ann in enumerate(anns_list):
-                # 显示格式: "Index: ID (Category)" 或其他有用信息
-                cat_id = ann.get('category_id', '?')
-                ann_id = ann.get('id', '?')
-                self.ann_listbox.insert(tk.END, f"#{idx} - ID:{ann_id} (Cat:{cat_id})")
+        self._refresh_canvas()
 
-            # 默认选中第0个或者上次选中的（如果范围允许）
-            target_idx = 0
-            if self.current_ann_index < len(anns_list):
-                target_idx = self.current_ann_index
+    def _set_tool_keypoint(self, kp_id):
+        self.selected_keypoint_id = kp_id
 
-            self.ann_listbox.selection_set(target_idx)
-            # 确保指针和UI同步
-            self._switch_current_label_pointer(target_idx)
-
-        else:
-            self.ann_listbox.insert(tk.END, "No Annotations")
-            self._switch_current_label_pointer(0)  # 即使没有 annotation，也允许在 index 0 上标注
-
-        # === 2. 绘制图片 (包含 bbox 和 keypoints) ===
-        self.render_image_with_bbox()
-
-    def on_annotation_select(self, event):
-        """处理列表选择事件"""
-        selection = self.ann_listbox.curselection()
-        if selection:
-            idx = selection[0]
-            if idx != self.current_ann_index:
-                # 切换到新人，指针指向新人的 label dict
-                self._switch_current_label_pointer(idx)
-                self.render_image_with_bbox()
-
-    def render_image_with_bbox(self):
-        """辅助函数：读取原图，画上当前选中ann的bbox和关键点，并显示"""
-        current_id = self.todo_ids[0]
-        img_file_name = self.LD_labels[current_id][0]['file_name']
-        img_path = self.image_dir / img_file_name
-
-        # 显示路径信息
-        rel_path = img_path.relative_to(self.image_dir).as_posix()
-        self.info_var.set(f"{len(self.labels)}/{len(self.LD_labels)} : {rel_path}")
-
-        # 打开图片
-        img = Image.open(img_path).convert("RGB")
-        draw = ImageDraw.Draw(img)
-
-        # === 1. 画 BBox ===
-        _, anns_list = self.LD_labels[current_id]
-        if anns_list and 0 <= self.current_ann_index < len(anns_list):
-            target_ann = anns_list[self.current_ann_index]
-            if "bbox" in target_ann:
-                # COCO bbox 格式: [x_min, y_min, width, height]
-                x, y, w, h = target_ann["bbox"]
-                # PIL rectangle 需要: [x_min, y_min, x_max, y_max]
-                draw.rectangle([x, y, x + w, y + h], outline="red", width=3)
-
-                # 可选：画个标签文字
-                draw.text((x, y - 15), f"ID: {target_ann.get('id')}", fill="red")
-
-        # === 2. 画 Keypoints (新功能) ===
-        # self.current_label 包含当前选中人物的所有标注点
-        r = 4  # 点的半径
-        for key_id, (kx, ky, kv) in self.current_label.items():
-            # 检查坐标是否有效 (不为 -1)
-            if kx != -1 and ky != -1:
-                # 获取对应的颜色
-                color = self.keypoint_colors.get(key_id, 'white')
-
-                # 画实心圆
-                # 坐标: [x0, y0, x1, y1]
-                draw.ellipse([kx - r, ky - r, kx + r, ky + r], fill=color, outline='black')
-
-                # === 新增: 显示 Vis ===
-                # 在点旁边显示可见性
-                # 稍微偏移一点坐标 (x+r+2, y-r)，使用描边效果让文字更清晰
-                draw.text((kx + r + 2, ky - r), str(kv), fill=color, stroke_fill="black", stroke_width=1)
-
-        # 显示图片
-        self.tk_img = ImageTk.PhotoImage(img)
-        self.image_label.config(image=self.tk_img)
-
-    def set_target_keypoint(self, keypoint_id):
-        self.selected_keypoint_id = keypoint_id
-
-    # ==========================================
-    # 结束标注
-    # ==========================================
-    def stop_labeling(self):
-        messagebox.showinfo("退出", "标注结束，数据已保存。")
-        self.master.destroy()
-
-    def on_image_click(self, event):
-        if self.selected_keypoint_id is None or self.selected_keypoint_id < 0:
-            messagebox.showwarning("提示", "请先选择一个关键点按钮，再在图片上点击。")
+    def _set_tool_vis(self, vis):
+        if self.selected_keypoint_id < 0:
+            messagebox.showwarning("提示", "请先选择关键点。")
             return
 
-        x, y = event.x, event.y
-        print("clicked:", x, y)
-        self.current_label[self.selected_keypoint_id][0] = x
-        self.current_label[self.selected_keypoint_id][1] = y
+        if self.selected_ann_index not in self.runtime_labels:
+            self.runtime_labels[self.selected_ann_index] = defaultdict(lambda: [-1, -1, -1])
 
-        # === 点击后立即刷新显示，以便看到刚才点的点 ===
-        self.render_image_with_bbox()
+        self.runtime_labels[self.selected_ann_index][self.selected_keypoint_id][2] = vis
+        self._refresh_canvas()
+
+    def _clear_current_point(self):
+        if self.selected_ann_index in self.runtime_labels:
+            if self.selected_keypoint_id in self.runtime_labels[self.selected_ann_index]:
+                self.runtime_labels[self.selected_ann_index][self.selected_keypoint_id] = [-1, -1, -1]
+                self._refresh_canvas()
+
+    def _prev_image(self):
+        if not self._save_current():
+            return
+        if self.current_img_index > 0:
+            self.current_img_index -= 1
+            self._load_current_image()
+        else:
+            messagebox.showinfo("提示", "已经是第一张。")
+
+    def _next_image(self):
+        if not self._save_current(): return
+        if self.current_img_index < len(self.data_manager.all_image_ids) - 1:
+            self.current_img_index += 1
+            self._load_current_image()
+        else:
+            messagebox.showinfo("提示", "已经是最后一张。")
 
 
 def main():
