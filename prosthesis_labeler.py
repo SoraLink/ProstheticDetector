@@ -438,7 +438,7 @@ class ProsthesisLabelerApp:
                 ).grid(row=r, column=c, padx=5, pady=2)
 
         # 2. Visibility buttons
-        for i in range(3):
+        for i in range(1, 3):
             tk.Button(
                 btn_frame, text=f"Vis {i}", width=18,
                 command=lambda v=i: self._set_tool_vis(v)
