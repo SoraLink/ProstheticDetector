@@ -17,30 +17,46 @@ class Config:
     WINDOW_HEIGHT = 900
 
     KEYPOINTS = {
-        1: 'Above right elbow residual limb end',
-        2: 'Below right elbow residual limb end',
-        3: 'Above left elbow residual limb end',
-        4: 'Below left elbow residual limb end',
-        5: 'Above right knee residual limb end',
-        6: 'Below right knee residual limb end',
-        7: 'Above left knee residual limb end',
-        8: 'Below left knee residual limb end',
+        # === Upper Body Residuals ===
+        1: 'Above left elbow residual limb end',
+        2: 'Above right elbow residual limb end',
+        3: 'Below left elbow residual limb end',
+        4: 'Below right elbow residual limb end',
+
+        # === Lower Body Residuals ===
+        5: 'Above left knee residual limb end',
+        6: 'Above right knee residual limb end',
+        7: 'Below left knee residual limb end',
+        8: 'Below right knee residual limb end',
+
+        # === Upper Body Prosthetics ===
         9: 'Left prosthetic elbow',
         10: 'Right prosthetic elbow',
-        11: 'Left prosthetic knee',
-        12: 'Right prosthetic knee',
-        13: 'Left prosthetic wrist',
-        14: 'Right prosthetic wrist',
+        11: 'Left prosthetic wrist',
+        12: 'Right prosthetic wrist',
+
+        # === Lower Body Prosthetics ===
+        13: 'Left prosthetic knee',
+        14: 'Right prosthetic knee',
         15: 'Left prosthetic ankle',
         16: 'Right prosthetic ankle',
     }
 
+    PROSTHETIC_IDS = {9, 10, 11, 12, 13, 14, 15, 16}
+
     COLORS = {
-        1: '#FF0000', 2: '#00FF00', 3: '#0000FF', 4: '#FFFF00',
-        5: '#FF00FF', 6: '#00FFFF', 7: '#FFA500', 8: '#800080',
-        9: '#A52A2A', 10: '#FFC0CB', 11: '#808000', 12: '#008080',
-        13: '#000080', 14: '#FFD700', 15: '#DC143C', 16: '#4B0082',
+        1: '#FF0000', 2: '#00FF00', 3: '#FF00FF', 4: '#00FFFF',
+        5: '#A52A2A', 6: '#FFC0CB', 7: '#000080', 8: '#8B4513',
+        9: '#0000FF', 10: '#B8860B', 11: '#FFA500', 12: '#800080',
+        13: '#808000', 14: '#008080', 15: '#DC143C', 16: '#4B0082',
     }
+
+    BUTTON_LAYOUT = [
+        [1, 2, 9, 10],  # Row 1: Above Elbow Res (L/R) | Pros Elbow (L/R)
+        [3, 4, 11, 12],  # Row 2: Below Elbow Res (L/R) | Pros Wrist (L/R)
+        [5, 6, 13, 14],  # Row 3: Above Knee Res (L/R)  | Pros Knee (L/R)
+        [7, 8, 15, 16]  # Row 4: Below Knee Res (L/R)  | Pros Ankle (L/R)
+    ]
 
 
 class DataManager:
@@ -253,7 +269,7 @@ class ImageVisualizer:
         img_path: Image path
         ld_anns: LDpose annotations
         selected_ann_index: The index of the selected annotations
-        current_labels_map: The current image's annotation {ann_idx: {kp_id: [x,y,v]}}
+        current_labels_map: The current image's annotation {ann_idx: {kp_id: [x,y,v,conn,flex]}}
         """
         try:
             img = Image.open(img_path).convert("RGB")
@@ -277,17 +293,31 @@ class ImageVisualizer:
 
         r = 4
         for key_id, val in current_person_labels.items():
-            if not isinstance(val, (list, tuple)) or len(val) < 3:
+            if not isinstance(val, (list, tuple)) or len(val) < 2:
                 continue
 
-            kx, ky, kv = val
+            kx, ky = val[0], val[1]
+
             if kx != -1 and ky != -1:
+                kv = val[2] if len(val) > 2 else -1
+                conn = val[3] if len(val) > 3 else -1
+                flex = val[4] if len(val) > 4 else -1
+
                 color = Config.COLORS.get(key_id, 'white')
                 draw.ellipse([kx - r, ky - r, kx + r, ky + r], fill=color, outline='black')
-                draw.text((kx + r + 2, ky - r), str(kv), fill=color, stroke_fill="black", stroke_width=1)
+
+                label_text = str(kv)
+
+                if key_id in Config.PROSTHETIC_IDS:
+                    c_str = "H" if conn == 0 else "P" if conn == 1 else "?"
+                    f_str = "Fix" if flex == 0 else "Free" if flex == 1 else "?"
+
+                    if conn != -1 or flex != -1:
+                        label_text += f"\n{c_str}|{f_str}"
+
+                draw.text((kx + r + 2, ky - r), label_text, fill=color, stroke_fill="black", stroke_width=1)
 
         return ImageTk.PhotoImage(img)
-
 
 class ProsthesisLabelerApp:
     def __init__(self, master):
@@ -394,9 +424,8 @@ class ProsthesisLabelerApp:
         btn_frame.pack(pady=10)
 
         # 1. Keypoint buttons
-        for i in range(4):
-            for j in range(4):
-                kp_id = i * 4 + j + 1
+        for r, row_ids in enumerate(Config.BUTTON_LAYOUT):
+            for c, kp_id in enumerate(row_ids):
                 name = Config.KEYPOINTS[kp_id]
                 color = Config.COLORS.get(kp_id, 'black')
 
@@ -404,25 +433,75 @@ class ProsthesisLabelerApp:
                     btn_frame,
                     text=name,
                     width=35,
-                    fg=color if kp_id not in [4, 6, 10] else 'black',
+                    fg=color,
                     command=lambda k=kp_id: self._set_tool_keypoint(k)
-                ).grid(row=i, column=j, padx=5, pady=2)
+                ).grid(row=r, column=c, padx=5, pady=2)
 
         # 2. Visibility buttons
-        for i in range(1, 4):
+        for i in range(3):
             tk.Button(
                 btn_frame, text=f"Vis {i}", width=18,
                 command=lambda v=i: self._set_tool_vis(v)
             ).grid(row=5, column=i, padx=5, pady=5)
 
-        # 3. Clear buttons
-        tk.Button(btn_frame, text="Clear selected point", width=18, command=self._clear_current_point).grid(row=6,
-                                                                                                            column=0)
+        tk.Label(btn_frame, text="Prev Node:").grid(row=6, column=0, sticky='e')
+        conn_frame = tk.Frame(btn_frame)
+        conn_frame.grid(row=6, column=1, columnspan=3, sticky='w')
+        tk.Button(conn_frame, text="Human (0)", command=lambda: self._set_attr_conn(0)).pack(side=tk.LEFT)
+        tk.Button(conn_frame, text="Prosthetic (1)", command=lambda: self._set_attr_conn(1)).pack(side=tk.LEFT)
+
+        tk.Label(btn_frame, text="Flexibility:").grid(row=7, column=0, sticky='e')
+        flex_frame = tk.Frame(btn_frame)
+        flex_frame.grid(row=7, column=1, columnspan=3, sticky='w')
+        tk.Button(flex_frame, text="Fixed (0)", command=lambda: self._set_attr_flex(0)).pack(side=tk.LEFT)
+        tk.Button(flex_frame, text="Free (1)", command=lambda: self._set_attr_flex(1)).pack(side=tk.LEFT)
+
+        tk.Button(
+            btn_frame,
+            text="Clear selected point",
+            width=18,
+            command=self._clear_current_point
+        ).grid(
+            row=7,
+            column=2,
+            pady=10
+        )
 
         nav_frame = tk.Frame(btn_frame)
-        nav_frame.grid(row=6, column=1, columnspan=2)
+        nav_frame.grid(row=6, column=2, columnspan=2)
         tk.Button(nav_frame, text="< Previous", width=15, command=self._prev_image).pack(side=tk.LEFT, padx=5)
         tk.Button(nav_frame, text="Next >", width=15, command=self._next_image).pack(side=tk.LEFT, padx=5)
+
+        # 插入在 _set_tool_vis 下面
+    def _set_attr_conn(self, val):
+        if self.selected_keypoint_id < 0: return
+        if self.selected_keypoint_id <= 8:
+            messagebox.showwarning("提示", "人体残肢点不需要设置连接属性")
+            return
+
+        if self.selected_ann_index not in self.runtime_labels:
+            self.runtime_labels[self.selected_ann_index] = defaultdict(lambda: [-1, -1, -1, -1, -1])  # 注意这里维度变长了
+
+        data = self.runtime_labels[self.selected_ann_index][self.selected_keypoint_id]
+        while len(data) < 5: data.append(-1)
+
+        data[3] = val
+        self._refresh_canvas()
+
+    def _set_attr_flex(self, val):
+        if self.selected_keypoint_id < 0: return
+        if self.selected_keypoint_id <= 8:
+            messagebox.showwarning("提示", "人体残肢点不需要设置自由度")
+            return
+
+        if self.selected_ann_index not in self.runtime_labels:
+            self.runtime_labels[self.selected_ann_index] = defaultdict(lambda: [-1, -1, -1, -1, -1])
+
+        data = self.runtime_labels[self.selected_ann_index][self.selected_keypoint_id]
+        while len(data) < 5: data.append(-1)
+
+        data[4] = val  # 第5位存自由度
+        self._refresh_canvas()
 
     def _load_current_image(self):
         """
@@ -510,22 +589,38 @@ class ProsthesisLabelerApp:
             self.image_label.config(image=tk_img)
 
     def _validate_before_save(self):
-        """
-        Validate the current image's annotation. If any element is -1, reject to save the annotation.
-        Returns:
 
-        """
         for ann_idx, kps in self.runtime_labels.items():
             for kp_id, val in kps.items():
-                x, y, v = val
-                is_empty = (x == -1 and y == -1 and v == -1)
-                is_full = (x != -1 and y != -1 and v != -1)
+                if not isinstance(val, list) or len(val) < 2:
+                    continue
 
-                if not is_empty and not is_full:
-                    kp_name = Config.KEYPOINTS.get(kp_id, f"ID {kp_id}")
-                    msg = f"保存失败：标注不完整\n人物#{ann_idx}, 点:{kp_name}, 值:{val}\n请补全或清除。"
+                x, y = val[0], val[1]
+
+                if x == -1 or y == -1:
+                    continue
+
+                kp_name = Config.KEYPOINTS.get(kp_id, f"ID {kp_id}")
+
+                vis = val[2] if len(val) > 2 else -1
+                if vis == -1:
+                    msg = f"保存失败：标注不完整\n人物#{ann_idx}, 点: {kp_name}\n请设置可见性 (Vis)。"
                     messagebox.showerror("校验错误", msg)
                     return False
+
+                if kp_id in Config.PROSTHETIC_IDS:
+                    conn = val[3] if len(val) > 3 else -1
+                    if conn == -1:
+                        msg = f"保存失败：标注不完整\n人物#{ann_idx}, 点: {kp_name}\n是假肢点，请设置 'Prev Node' (Human/Prosthetic)。"
+                        messagebox.showerror("校验错误", msg)
+                        return False
+
+                    flex = val[4] if len(val) > 4 else -1
+                    if flex == -1:
+                        msg = f"保存失败：标注不完整\n人物#{ann_idx}, 点: {kp_name}\n是假肢点，请设置 'Flexibility' (Fixed/Free)。"
+                        messagebox.showerror("校验错误", msg)
+                        return False
+
         return True
 
     def _save_current(self):
