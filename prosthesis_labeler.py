@@ -1,4 +1,5 @@
 import json
+import os
 import tkinter as tk
 from tkinter import messagebox, filedialog
 from collections import defaultdict
@@ -319,14 +320,25 @@ class ProsthesisLabelerApp:
         self._load_current_image()
 
     def _init_paths(self):
-        ld_path = filedialog.askopenfilename(title="选择 LDPose annotation (.json)", filetypes=[("JSON", "*.json")])
+        ld_path = filedialog.askopenfilename(
+            title="选择 LDPose annotation (.json)",
+            filetypes=[("JSON", "*.json")],
+            initialdir='./ldpose_final/annotations'
+        )
         if not ld_path: return False
 
-        out_path = filedialog.asksaveasfilename(title="保存 labels.json 位置", initialfile="labels.json",
-                                                defaultextension=".json")
+        out_path = filedialog.asksaveasfilename(
+            title="保存 labels.json 位置",
+            initialfile="labels.json",
+            defaultextension=".json",
+            initialdir='./'
+        )
         if not out_path: return False
 
-        img_dir = filedialog.askdirectory(title="选择图片目录")
+        img_dir = filedialog.askdirectory(
+            title="选择图片目录",
+            initialdir='./ldpose_final'
+        )
         if not img_dir: return False
 
         if not Path(out_path).exists():
