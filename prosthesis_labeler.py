@@ -58,6 +58,21 @@ class Config:
         [7, 8, 15, 16]  # Row 4: Below Knee Res (L/R)  | Pros Ankle (L/R)
     ]
 
+    COCO_SKELETON = [
+        (0, 1), (0, 2), (1, 3), (2, 4),
+        (5, 6),
+        (5, 7), (7, 9),
+        (6, 8), (8, 10),
+        (11, 12),
+        (11, 13), (13, 15),
+        (12, 14), (14, 16),
+        (5, 11), (6, 12)
+    ]
+
+    COCO_LEFT_SIDE = {5, 7, 9, 11, 13, 15}
+
+    COCO_RIGHT_SIDE = {6, 8, 10, 12, 14, 16}
+
 
 class DataManager:
     """
@@ -264,7 +279,7 @@ class ImageVisualizer:
     The ImageVisualizer class response for the
     """
 
-    def render(self, img_path, ld_anns, selected_ann_index, current_labels_map):
+    def render(self, img_path, ld_anns, selected_ann_index, current_labels_map, show_coco_kps=True):
         """
         img_path: Image path
         ld_anns: LDpose annotations
@@ -279,16 +294,22 @@ class ImageVisualizer:
 
         draw = ImageDraw.Draw(img)
 
-        # 1. Draw bbox based on the LDpose annotation
-        if ld_anns:
-            if 0 <= selected_ann_index < len(ld_anns):
-                target_ann = ld_anns[selected_ann_index]
-                if "bbox" in target_ann:
-                    x, y, w, h = target_ann["bbox"]
-                    draw.rectangle([x, y, x + w, y + h], outline="red", width=3)
-                    draw.text((x, y - 15), f"ID: {target_ann.get('id')}", fill="red")
+        if ld_anns and 0 <= selected_ann_index < len(ld_anns):
+            target_ann = ld_anns[selected_ann_index]
 
-        # Drawing the keypoints
+            # 1. (Optional) Draw COCO keypoints/skeleton - Bottom Layer
+            if show_coco_kps:
+                self._draw_coco_keypoints(draw, target_ann)
+
+            # 2. Draw bbox - Middle Layer (Fixed: Was missing)
+            if "bbox" in target_ann:
+                x, y, w, h = target_ann["bbox"]
+                # 画红框
+                draw.rectangle([x, y, x + w, y + h], outline="red", width=3)
+                # 画 ID 文本
+                draw.text((x, y - 15), f"ID: {target_ann.get('id')}", fill="red")
+
+        # 3. Drawing the custom keypoints - Top Layer
         current_person_labels = current_labels_map.get(selected_ann_index, {})
 
         r = 4
@@ -319,6 +340,40 @@ class ImageVisualizer:
 
         return ImageTk.PhotoImage(img)
 
+    def _draw_coco_keypoints(self, draw, ann):
+        """
+        Keypoints format in JSON: [x, y, v, x, y, v, ...]
+        """
+        kps = ann.get("keypoints", [])
+        if not kps:
+            return
+
+        def get_kp(index):
+            idx = index * 3
+            if idx + 2 < len(kps):
+                return kps[idx], kps[idx + 1], kps[idx + 2]
+            return 0, 0, 0
+
+        for i_start, i_end in Config.COCO_SKELETON:
+            x1, y1, v1 = get_kp(i_start)
+            x2, y2, v2 = get_kp(i_end)
+
+            if v1 > 0 and v2 > 0:
+                draw.line([(x1, y1), (x2, y2)], fill='black', width=2)
+
+        r = 3
+        for i in range(17):
+            x, y, v = get_kp(i)
+            if v > 0:
+                draw.ellipse([x - r, y - r, x + r, y + r], fill='black', outline=None)
+                text_pos = (x + 5, y - 5)
+
+                if i in Config.COCO_LEFT_SIDE:
+                    draw.text(text_pos, "L", fill="black")
+                elif i in Config.COCO_RIGHT_SIDE:
+                    draw.text(text_pos, "R", fill="black")
+
+
 class ProsthesisLabelerApp:
     def __init__(self, master):
         self.master = master
@@ -333,6 +388,8 @@ class ProsthesisLabelerApp:
         self.selected_keypoint_id = -1
 
         self.runtime_labels = {}
+        # 默认不显示 COCO
+        self.show_coco_var = tk.BooleanVar(value=False)
 
         if not self._init_paths():
             self.master.destroy()
@@ -380,14 +437,11 @@ class ProsthesisLabelerApp:
 
     def _setup_ui(self):
         """
-        Set up the UI
-        Returns:
-            None
+        Set up the UI with Scrollbars for the image
         """
         paned = tk.PanedWindow(self.master, orient=tk.HORIZONTAL)
         paned.pack(fill=tk.BOTH, expand=True)
 
-        # The left window contain a list of annotations of an image
         left_frame = tk.Frame(paned, width=250, bg="#f0f0f0")
         paned.add(left_frame)
 
@@ -403,21 +457,76 @@ class ProsthesisLabelerApp:
         sb.pack(side=tk.RIGHT, fill=tk.Y)
         self.ann_listbox.config(yscrollcommand=sb.set)
 
-        # The right window contains image and button
         right_frame = tk.Frame(paned)
         paned.add(right_frame)
 
-        self.image_label = tk.Label(right_frame, bd=0, highlightthickness=0)
-        self.image_label.pack(expand=True)
-        self.image_label.bind("<Button-1>", self._on_canvas_click)
+        # ---------------------------------------------------------
+        controls_frame = tk.Frame(right_frame, bd=1, relief=tk.RAISED)
+        controls_frame.pack(side=tk.BOTTOM, fill=tk.X)
 
         self.info_var = tk.StringVar()
-        tk.Label(right_frame, textvariable=self.info_var).pack(pady=5)
+        tk.Label(controls_frame, textvariable=self.info_var).pack(pady=2)
 
         self.counter_var = tk.StringVar()
-        tk.Label(right_frame, textvariable=self.counter_var, font=("Arial", 12)).pack()
+        tk.Label(controls_frame, textvariable=self.counter_var, font=("Arial", 12)).pack(pady=2)
 
-        self._setup_control_buttons(right_frame)
+        self._setup_control_buttons(controls_frame)
+
+        # ---------------------------------------------------------
+        image_container = tk.Frame(right_frame, bg="gray")
+        image_container.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+
+        self.canvas = tk.Canvas(image_container, bg="#404040")
+        v_scroll = tk.Scrollbar(image_container, orient=tk.VERTICAL, command=self.canvas.yview)
+        h_scroll = tk.Scrollbar(image_container, orient=tk.HORIZONTAL, command=self.canvas.xview)
+
+        v_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        h_scroll.pack(side=tk.BOTTOM, fill=tk.X)
+        self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        self.canvas.configure(yscrollcommand=v_scroll.set, xscrollcommand=h_scroll.set)
+
+        self.image_label = tk.Label(self.canvas, bd=0, highlightthickness=0)
+        self.canvas_window = self.canvas.create_window((0, 0), window=self.image_label, anchor="nw")
+
+        self.image_label.bind("<Configure>", self._on_image_resize)
+
+        self.image_label.bind("<Button-1>", self._on_canvas_click)
+
+        self.image_label.bind('<Enter>', self._bound_to_mousewheel)
+        self.canvas.bind('<Enter>', self._bound_to_mousewheel)
+
+        self.image_label.bind('<Leave>', self._unbound_to_mousewheel)
+        self.canvas.bind('<Leave>', self._unbound_to_mousewheel)
+
+        # Bind Mouse Wheel Event
+        self.canvas.bind_all("<MouseWheel>", self._on_mousewheel)
+        self.canvas.bind_all("<Button-4>", self._on_mousewheel)
+        self.canvas.bind_all("<Button-5>", self._on_mousewheel)
+
+    def _bound_to_mousewheel(self, event):
+        self.canvas.focus_set()
+
+        self.canvas.bind_all("<MouseWheel>", self._on_mousewheel)
+        self.canvas.bind_all("<Button-4>", self._on_mousewheel)
+        self.canvas.bind_all("<Button-5>", self._on_mousewheel)
+
+    def _unbound_to_mousewheel(self, event):
+        self.canvas.unbind_all("<MouseWheel>")
+        self.canvas.unbind_all("<Button-4>")
+        self.canvas.unbind_all("<Button-5>")
+
+    def _on_mousewheel(self, event):
+        if event.num == 4:
+            self.canvas.yview_scroll(-1, "units")
+        elif event.num == 5:
+            self.canvas.yview_scroll(1, "units")
+        else:
+            delta = int(-1 * (event.delta / 120))
+            self.canvas.yview_scroll(delta, "units")
+
+    def _on_image_resize(self, event):
+        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
 
     def _setup_control_buttons(self, parent):
         btn_frame = tk.Frame(parent)
@@ -443,6 +552,17 @@ class ProsthesisLabelerApp:
                 btn_frame, text=f"Vis {i}", width=18,
                 command=lambda v=i: self._set_tool_vis(v)
             ).grid(row=5, column=i, padx=5, pady=5)
+
+        # 3. Toggle COCO Button (Replaced Checkbox)
+        self.btn_toggle_coco = tk.Button(
+            btn_frame,
+            text="显示原始 COCO 骨架",
+            width=25,
+            command=self._toggle_coco_display
+        )
+        self.btn_toggle_coco.grid(row=5, column=0, padx=5, pady=5)
+
+        self.default_btn_bg = self.btn_toggle_coco.cget("bg")
 
         tk.Label(btn_frame, text="Prev Node:").grid(row=6, column=0, sticky='e')
         conn_frame = tk.Frame(btn_frame)
@@ -472,7 +592,18 @@ class ProsthesisLabelerApp:
         tk.Button(nav_frame, text="< Previous", width=15, command=self._prev_image).pack(side=tk.LEFT, padx=5)
         tk.Button(nav_frame, text="Next >", width=15, command=self._next_image).pack(side=tk.LEFT, padx=5)
 
-        # 插入在 _set_tool_vis 下面
+    def _toggle_coco_display(self):
+        """Toggle the COCO keypoint display state"""
+        new_val = not self.show_coco_var.get()
+        self.show_coco_var.set(new_val)
+
+        if new_val:
+            self.btn_toggle_coco.config(text="隐藏原始 COCO 骨架", relief="sunken", bg="#ddd")
+        else:
+            self.btn_toggle_coco.config(text="显示原始 COCO 骨架", relief="raised", bg=self.default_btn_bg)
+
+        self._refresh_canvas()
+
     def _set_attr_conn(self, val):
         if self.selected_keypoint_id < 0: return
         if self.selected_keypoint_id <= 8:
@@ -581,7 +712,8 @@ class ProsthesisLabelerApp:
             ctx['full_path'],
             ctx['ld_anns'],
             self.selected_ann_index,
-            self.runtime_labels
+            self.runtime_labels,
+            show_coco_kps=self.show_coco_var.get()
         )
 
         if tk_img:
@@ -629,6 +761,7 @@ class ProsthesisLabelerApp:
         Returns:
             Boolean: True if the annotation is saved, False otherwise
         """
+
         if not self._validate_before_save():
             return False
 
@@ -638,6 +771,20 @@ class ProsthesisLabelerApp:
         count = self.data_manager.save_annotation_result(ctx['id'], self.runtime_labels)
         self._update_counter(saved_count=count)
         return True
+
+    def _has_valid_data(self):
+        """
+        Check if there is any valid data in the canvas
+        """
+        if not self.runtime_labels:
+            return False
+
+        for person_labels in self.runtime_labels.values():
+            for val in person_labels.values():
+                if isinstance(val, list) and len(val) >= 2:
+                    if val[0] != -1 and val[1] != -1:
+                        return True
+        return False
 
     def _update_counter(self, saved_count=None):
         if saved_count is None:
