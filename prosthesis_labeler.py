@@ -304,9 +304,7 @@ class ImageVisualizer:
             # 2. Draw bbox - Middle Layer (Fixed: Was missing)
             if "bbox" in target_ann:
                 x, y, w, h = target_ann["bbox"]
-                # 画红框
                 draw.rectangle([x, y, x + w, y + h], outline="red", width=3)
-                # 画 ID 文本
                 draw.text((x, y - 15), f"ID: {target_ann.get('id')}", fill="red")
 
         # 3. Drawing the custom keypoints - Top Layer
@@ -321,8 +319,8 @@ class ImageVisualizer:
 
             if kx != -1 and ky != -1:
                 kv = val[2] if len(val) > 2 else -1
-                conn = val[3] if len(val) > 3 else -1
-                flex = val[4] if len(val) > 4 else -1
+
+                flex = val[3] if len(val) > 3 else -1
 
                 color = Config.COLORS.get(key_id, 'white')
                 draw.ellipse([kx - r, ky - r, kx + r, ky + r], fill=color, outline='black')
@@ -330,11 +328,10 @@ class ImageVisualizer:
                 label_text = str(kv)
 
                 if key_id in Config.PROSTHETIC_IDS:
-                    c_str = "H" if conn == 0 else "P" if conn == 1 else "?"
                     f_str = "Fix" if flex == 0 else "Free" if flex == 1 else "?"
 
-                    if conn != -1 or flex != -1:
-                        label_text += f"\n{c_str}|{f_str}"
+                    if flex != -1:
+                        label_text += f"\n{f_str}"
 
                 draw.text((kx + r + 2, ky - r), label_text, fill=color, stroke_fill="black", stroke_width=1)
 
@@ -564,12 +561,6 @@ class ProsthesisLabelerApp:
 
         self.default_btn_bg = self.btn_toggle_coco.cget("bg")
 
-        tk.Label(btn_frame, text="Prev Node:").grid(row=6, column=0, sticky='e')
-        conn_frame = tk.Frame(btn_frame)
-        conn_frame.grid(row=6, column=1, columnspan=3, sticky='w')
-        tk.Button(conn_frame, text="Human (0)", command=lambda: self._set_attr_conn(0)).pack(side=tk.LEFT)
-        tk.Button(conn_frame, text="Prosthetic (1)", command=lambda: self._set_attr_conn(1)).pack(side=tk.LEFT)
-
         tk.Label(btn_frame, text="Flexibility:").grid(row=7, column=0, sticky='e')
         flex_frame = tk.Frame(btn_frame)
         flex_frame.grid(row=7, column=1, columnspan=3, sticky='w')
@@ -604,21 +595,6 @@ class ProsthesisLabelerApp:
 
         self._refresh_canvas()
 
-    def _set_attr_conn(self, val):
-        if self.selected_keypoint_id < 0: return
-        if self.selected_keypoint_id <= 8:
-            messagebox.showwarning("提示", "人体残肢点不需要设置连接属性")
-            return
-
-        if self.selected_ann_index not in self.runtime_labels:
-            self.runtime_labels[self.selected_ann_index] = defaultdict(lambda: [-1, -1, -1, -1, -1])  # 注意这里维度变长了
-
-        data = self.runtime_labels[self.selected_ann_index][self.selected_keypoint_id]
-        while len(data) < 5: data.append(-1)
-
-        data[3] = val
-        self._refresh_canvas()
-
     def _set_attr_flex(self, val):
         if self.selected_keypoint_id < 0: return
         if self.selected_keypoint_id <= 8:
@@ -626,12 +602,13 @@ class ProsthesisLabelerApp:
             return
 
         if self.selected_ann_index not in self.runtime_labels:
-            self.runtime_labels[self.selected_ann_index] = defaultdict(lambda: [-1, -1, -1, -1, -1])
+            self.runtime_labels[self.selected_ann_index] = defaultdict(lambda: [-1, -1, -1, -1])
 
         data = self.runtime_labels[self.selected_ann_index][self.selected_keypoint_id]
-        while len(data) < 5: data.append(-1)
 
-        data[4] = val  # 第5位存自由度
+        while len(data) < 4: data.append(-1)
+        data[3] = val
+
         self._refresh_canvas()
 
     def _load_current_image(self):
@@ -721,7 +698,6 @@ class ProsthesisLabelerApp:
             self.image_label.config(image=tk_img)
 
     def _validate_before_save(self):
-
         for ann_idx, kps in self.runtime_labels.items():
             for kp_id, val in kps.items():
                 if not isinstance(val, list) or len(val) < 2:
@@ -741,13 +717,8 @@ class ProsthesisLabelerApp:
                     return False
 
                 if kp_id in Config.PROSTHETIC_IDS:
-                    conn = val[3] if len(val) > 3 else -1
-                    if conn == -1:
-                        msg = f"保存失败：标注不完整\n人物#{ann_idx}, 点: {kp_name}\n是假肢点，请设置 'Prev Node' (Human/Prosthetic)。"
-                        messagebox.showerror("校验错误", msg)
-                        return False
+                    flex = val[3] if len(val) > 3 else -1
 
-                    flex = val[4] if len(val) > 4 else -1
                     if flex == -1:
                         msg = f"保存失败：标注不完整\n人物#{ann_idx}, 点: {kp_name}\n是假肢点，请设置 'Flexibility' (Fixed/Free)。"
                         messagebox.showerror("校验错误", msg)
