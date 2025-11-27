@@ -42,6 +42,17 @@ class Config:
         16: 'Right prosthetic ankle',
     }
 
+    SHORT_NAMES = {
+        1: 'L-Elbow\nRes(Above)', 2: 'R-Elbow\nRes(Above)',
+        3: 'L-Elbow\nRes(Below)', 4: 'R-Elbow\nRes(Below)',
+        5: 'L-Knee\nRes(Above)', 6: 'R-Knee\nRes(Above)',
+        7: 'L-Knee\nRes(Below)', 8: 'R-Knee\nRes(Below)',
+        9: 'L-Pros\nElbow', 10: 'R-Pros\nElbow',
+        11: 'L-Pros\nWrist', 12: 'R-Pros\nWrist',
+        13: 'L-Pros\nKnee', 14: 'R-Pros\nKnee',
+        15: 'L-Pros\nAnkle', 16: 'R-Pros\nAnkle',
+    }
+
     PROSTHETIC_IDS = {9, 10, 11, 12, 13, 14, 15, 16}
 
     COLORS = {
@@ -279,12 +290,15 @@ class ImageVisualizer:
     The ImageVisualizer class response for the
     """
 
-    def render(self, img_path, ld_anns, selected_ann_index, current_labels_map, show_coco_kps=True):
+    def render(self, img_path, ld_anns, selected_ann_index, current_labels_map, show_coco_kps=True,
+               show_extra_kps=False, show_bbox=True):
         """
         img_path: Image path
         ld_anns: LDpose annotations
         selected_ann_index: The index of the selected annotations
         current_labels_map: The current image's annotation {ann_idx: {kp_id: [x,y,v,conn,flex]}}
+        show_coco_kps: Whether to show standard COCO keypoints (0-16)
+        show_extra_kps: Whether to show extra LDpose keypoints (17-24)
         """
         try:
             img = Image.open(img_path).convert("RGB")
@@ -297,17 +311,21 @@ class ImageVisualizer:
         if ld_anns and 0 <= selected_ann_index < len(ld_anns):
             target_ann = ld_anns[selected_ann_index]
 
-            # 1. (Optional) Draw COCO keypoints/skeleton - Bottom Layer
+            # 1. Draw COCO keypoints/skeleton (0-16)
             if show_coco_kps:
                 self._draw_coco_keypoints(draw, target_ann)
 
-            # 2. Draw bbox - Middle Layer (Fixed: Was missing)
-            if "bbox" in target_ann:
+            # 2. [NEW] Draw Extra keypoints (17-24)
+            if show_extra_kps:
+                self._draw_extra_keypoints(draw, target_ann)
+
+            # 3. Draw bbox
+            if show_bbox and "bbox" in target_ann:
                 x, y, w, h = target_ann["bbox"]
                 draw.rectangle([x, y, x + w, y + h], outline="red", width=3)
                 draw.text((x, y - 15), f"ID: {target_ann.get('id')}", fill="red")
 
-        # 3. Drawing the custom keypoints - Top Layer
+        # 4. Drawing the custom keypoints - Top Layer
         current_person_labels = current_labels_map.get(selected_ann_index, {})
 
         r = 4
@@ -319,23 +337,21 @@ class ImageVisualizer:
 
             if kx != -1 and ky != -1:
                 kv = val[2] if len(val) > 2 else -1
-
                 flex = val[3] if len(val) > 3 else -1
 
                 color = Config.COLORS.get(key_id, 'white')
                 draw.ellipse([kx - r, ky - r, kx + r, ky + r], fill=color, outline='black')
 
                 label_text = str(kv)
-
                 if key_id in Config.PROSTHETIC_IDS:
                     f_str = "Fix" if flex == 0 else "Free" if flex == 1 else "?"
-
                     if flex != -1:
                         label_text += f"\n{f_str}"
 
                 draw.text((kx + r + 2, ky - r), label_text, fill=color, stroke_fill="black", stroke_width=1)
 
         return ImageTk.PhotoImage(img)
+
 
     def _draw_coco_keypoints(self, draw, ann):
         """
@@ -371,6 +387,29 @@ class ImageVisualizer:
                     draw.text(text_pos, "R", fill="black")
 
 
+    def _draw_extra_keypoints(self, draw, ann):
+        """
+        Draw keypoints 17-24 (indices)
+        """
+        kps = ann.get("keypoints", [])
+        if not kps:
+            return
+
+        def get_kp(index):
+            idx = index * 3
+            if idx + 2 < len(kps):
+                return kps[idx], kps[idx + 1], kps[idx + 2]
+            return 0, 0, 0
+
+        r = 4
+        for i in range(17, 25):
+            x, y, v = get_kp(i)
+
+            if v > 0:
+                draw.ellipse([x - r, y - r, x + r, y + r], fill='#00BFFF', outline='white')
+                draw.text((x + 5, y - 5), f"E{i}", fill="#00BFFF")
+
+
 class ProsthesisLabelerApp:
     def __init__(self, master):
         self.master = master
@@ -385,8 +424,10 @@ class ProsthesisLabelerApp:
         self.selected_keypoint_id = -1
 
         self.runtime_labels = {}
-        # 默认不显示 COCO
+
         self.show_coco_var = tk.BooleanVar(value=False)
+        self.show_extra_var = tk.BooleanVar(value=False)
+        self.show_bbox_var = tk.BooleanVar(value=True)  # [NEW] 默认显示 BBox
 
         if not self._init_paths():
             self.master.destroy()
@@ -439,6 +480,7 @@ class ProsthesisLabelerApp:
         paned = tk.PanedWindow(self.master, orient=tk.HORIZONTAL)
         paned.pack(fill=tk.BOTH, expand=True)
 
+        # === Left Frame (Annotation List) ===
         left_frame = tk.Frame(paned, width=250, bg="#f0f0f0")
         paned.add(left_frame)
 
@@ -454,22 +496,22 @@ class ProsthesisLabelerApp:
         sb.pack(side=tk.RIGHT, fill=tk.Y)
         self.ann_listbox.config(yscrollcommand=sb.set)
 
+        # === Right Frame ===
         right_frame = tk.Frame(paned)
         paned.add(right_frame)
 
-        # ---------------------------------------------------------
+        # 1. Bottom Control Panel
         controls_frame = tk.Frame(right_frame, bd=1, relief=tk.RAISED)
         controls_frame.pack(side=tk.BOTTOM, fill=tk.X)
 
+        # 初始化变量 (但不在这里 pack Label，移到 _setup_control_buttons 里面去)
         self.info_var = tk.StringVar()
-        tk.Label(controls_frame, textvariable=self.info_var).pack(pady=2)
-
         self.counter_var = tk.StringVar()
-        tk.Label(controls_frame, textvariable=self.counter_var, font=("Arial", 12)).pack(pady=2)
 
+        # 生成控制面板内容
         self._setup_control_buttons(controls_frame)
 
-        # ---------------------------------------------------------
+        # 2. Image Canvas
         image_container = tk.Frame(right_frame, bg="gray")
         image_container.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
 
@@ -480,23 +522,18 @@ class ProsthesisLabelerApp:
         v_scroll.pack(side=tk.RIGHT, fill=tk.Y)
         h_scroll.pack(side=tk.BOTTOM, fill=tk.X)
         self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
         self.canvas.configure(yscrollcommand=v_scroll.set, xscrollcommand=h_scroll.set)
 
         self.image_label = tk.Label(self.canvas, bd=0, highlightthickness=0)
         self.canvas_window = self.canvas.create_window((0, 0), window=self.image_label, anchor="nw")
 
+        # Bind events
         self.image_label.bind("<Configure>", self._on_image_resize)
-
         self.image_label.bind("<Button-1>", self._on_canvas_click)
-
         self.image_label.bind('<Enter>', self._bound_to_mousewheel)
         self.canvas.bind('<Enter>', self._bound_to_mousewheel)
-
         self.image_label.bind('<Leave>', self._unbound_to_mousewheel)
         self.canvas.bind('<Leave>', self._unbound_to_mousewheel)
-
-        # Bind Mouse Wheel Event
         self.canvas.bind_all("<MouseWheel>", self._on_mousewheel)
         self.canvas.bind_all("<Button-4>", self._on_mousewheel)
         self.canvas.bind_all("<Button-5>", self._on_mousewheel)
@@ -526,62 +563,113 @@ class ProsthesisLabelerApp:
         self.canvas.configure(scrollregion=self.canvas.bbox("all"))
 
     def _setup_control_buttons(self, parent):
-        btn_frame = tk.Frame(parent)
-        btn_frame.pack(pady=10)
+        """
+        在底部的 parent Frame 中：
+        - 左半边：4x4 关键点大按钮
+        - 右半边：信息显示、属性设置、开关、导航
+        """
+        # === 1. 左侧区域：关键点按钮 ===
+        # 使用 Frame 包装，放在左边
+        kp_panel = tk.Frame(parent, bd=1, relief=tk.SUNKEN)
+        kp_panel.pack(side=tk.LEFT, fill=tk.Y, padx=10, pady=10)
 
-        # 1. Keypoint buttons
+        # 4x4 Grid 配置
+        for i in range(4): kp_panel.columnconfigure(i, weight=1)
+        for i in range(4): kp_panel.rowconfigure(i, weight=1)
+
         for r, row_ids in enumerate(Config.BUTTON_LAYOUT):
             for c, kp_id in enumerate(row_ids):
-                name = Config.KEYPOINTS[kp_id]
+                # 使用短名
+                name = Config.SHORT_NAMES.get(kp_id, Config.KEYPOINTS[kp_id])
                 color = Config.COLORS.get(kp_id, 'black')
 
                 tk.Button(
-                    btn_frame,
+                    kp_panel,
                     text=name,
-                    width=35,
                     fg=color,
+                    font=("Arial", 9, "bold"),
+                    width=15,  # 增加宽度
+                    height=3,  # 增加高度
+                    bg="#f9f9f9",
+                    wraplength=100,
                     command=lambda k=kp_id: self._set_tool_keypoint(k)
-                ).grid(row=r, column=c, padx=5, pady=2)
+                ).grid(row=r, column=c, padx=2, pady=2, sticky="nsew")
 
-        # 2. Visibility buttons
-        for i in range(1, 3):
-            tk.Button(
-                btn_frame, text=f"Vis {i}", width=18,
-                command=lambda v=i: self._set_tool_vis(v)
-            ).grid(row=5, column=i, padx=5, pady=5)
+        # === 2. 右侧区域：其他所有功能 ===
+        tools_panel = tk.Frame(parent)
+        tools_panel.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=10, pady=5)
 
-        # 3. Toggle COCO Button (Replaced Checkbox)
-        self.btn_toggle_coco = tk.Button(
-            btn_frame,
-            text="显示原始 COCO 骨架",
-            width=25,
-            command=self._toggle_coco_display
-        )
-        self.btn_toggle_coco.grid(row=5, column=0, padx=5, pady=5)
+        # (A) 信息显示 (移到这里)
+        info_frame = tk.Frame(tools_panel)
+        info_frame.pack(fill=tk.X, pady=5)
+        tk.Label(info_frame, textvariable=self.info_var, font=("Arial", 10)).pack(side=tk.LEFT)
+        tk.Label(info_frame, textvariable=self.counter_var, font=("Arial", 11, "bold"), fg="blue").pack(side=tk.RIGHT)
 
+        tk.Frame(tools_panel, height=2, bd=1, relief=tk.GROOVE).pack(fill=tk.X, pady=5)  # 分割线
+
+        # (B) 属性设置 (Vis & Flex)
+        attr_frame = tk.Frame(tools_panel)
+        attr_frame.pack(fill=tk.X, pady=5)
+
+        tk.Label(attr_frame, text="Visibility:").pack(side=tk.LEFT)
+        tk.Button(attr_frame, text="Occluded (1)", command=lambda: self._set_tool_vis(1)).pack(side=tk.LEFT, padx=5)
+        tk.Button(attr_frame, text="Visible (2)", command=lambda: self._set_tool_vis(2)).pack(side=tk.LEFT, padx=5)
+
+        tk.Label(attr_frame, text="| Flexibility:").pack(side=tk.LEFT, padx=10)
+        tk.Button(attr_frame, text="Fixed (0)", command=lambda: self._set_attr_flex(0)).pack(side=tk.LEFT, padx=5)
+        tk.Button(attr_frame, text="Free (1)", command=lambda: self._set_attr_flex(1)).pack(side=tk.LEFT, padx=5)
+
+        tk.Button(attr_frame, text="Clear Point", bg="#ffcccc", command=self._clear_current_point).pack(side=tk.RIGHT,
+                                                                                                        padx=10)
+
+        # (C) 显示开关 (Toggles)
+        toggle_frame = tk.Frame(tools_panel)
+        toggle_frame.pack(fill=tk.X, pady=5)
+
+        self.btn_toggle_coco = tk.Button(toggle_frame, text="显示原始 COCO", command=self._toggle_coco_display)
+        self.btn_toggle_coco.pack(side=tk.LEFT, padx=5, expand=True, fill=tk.X)
+
+        self.btn_toggle_extra = tk.Button(toggle_frame, text="显示残肢点", command=self._toggle_extra_display)
+        self.btn_toggle_extra.pack(side=tk.LEFT, padx=5, expand=True, fill=tk.X)
+
+        # 默认显示 BBox，按钮初始为'隐藏'
+        self.btn_toggle_bbox = tk.Button(toggle_frame, text="隐藏 BBox", relief="sunken", bg="#FFCCCB",
+                                         command=self._toggle_bbox_display)
+        self.btn_toggle_bbox.pack(side=tk.LEFT, padx=5, expand=True, fill=tk.X)
         self.default_btn_bg = self.btn_toggle_coco.cget("bg")
 
-        tk.Label(btn_frame, text="Flexibility:").grid(row=7, column=0, sticky='e')
-        flex_frame = tk.Frame(btn_frame)
-        flex_frame.grid(row=7, column=1, columnspan=3, sticky='w')
-        tk.Button(flex_frame, text="Fixed (0)", command=lambda: self._set_attr_flex(0)).pack(side=tk.LEFT)
-        tk.Button(flex_frame, text="Free (1)", command=lambda: self._set_attr_flex(1)).pack(side=tk.LEFT)
+        # (D) 导航按钮 (Navigation)
+        nav_frame = tk.Frame(tools_panel)
+        nav_frame.pack(fill=tk.X, pady=10)
 
-        tk.Button(
-            btn_frame,
-            text="Clear selected point",
-            width=18,
-            command=self._clear_current_point
-        ).grid(
-            row=7,
-            column=2,
-            pady=10
-        )
+        tk.Button(nav_frame, text="< Previous Image", height=2, command=self._prev_image).pack(side=tk.LEFT, fill=tk.X,
+                                                                                               expand=True, padx=20)
+        tk.Button(nav_frame, text="Next Image >", height=2, bg="#ddffdd", command=self._next_image).pack(side=tk.LEFT,
+                                                                                                         fill=tk.X,
+                                                                                                         expand=True,
+                                                                                                         padx=20)
 
-        nav_frame = tk.Frame(btn_frame)
-        nav_frame.grid(row=6, column=2, columnspan=2)
-        tk.Button(nav_frame, text="< Previous", width=15, command=self._prev_image).pack(side=tk.LEFT, padx=5)
-        tk.Button(nav_frame, text="Next >", width=15, command=self._next_image).pack(side=tk.LEFT, padx=5)
+    def _toggle_bbox_display(self):
+        new_val = not self.show_bbox_var.get()
+        self.show_bbox_var.set(new_val)
+
+        if new_val:
+            self.btn_toggle_bbox.config(text="隐藏 BBox 框", relief="sunken", bg="#FFCCCB")
+        else:
+            self.btn_toggle_bbox.config(text="显示 BBox 框", relief="raised", bg=self.default_btn_bg)
+
+        self._refresh_canvas()
+
+    def _toggle_extra_display(self):
+        new_val = not self.show_extra_var.get()
+        self.show_extra_var.set(new_val)
+
+        if new_val:
+            self.btn_toggle_extra.config(text="隐藏残肢参考点 (17-24)", relief="sunken", bg="#ADD8E6")  # 亮蓝色背景提示
+        else:
+            self.btn_toggle_extra.config(text="显示残肢参考点 (17-24)", relief="raised", bg=self.default_btn_bg)
+
+        self._refresh_canvas()
 
     def _toggle_coco_display(self):
         """Toggle the COCO keypoint display state"""
@@ -690,7 +778,9 @@ class ProsthesisLabelerApp:
             ctx['ld_anns'],
             self.selected_ann_index,
             self.runtime_labels,
-            show_coco_kps=self.show_coco_var.get()
+            show_coco_kps=self.show_coco_var.get(),
+            show_extra_kps=self.show_extra_var.get(),
+            show_bbox=self.show_bbox_var.get()
         )
 
         if tk_img:
@@ -761,7 +851,6 @@ class ProsthesisLabelerApp:
         if saved_count is None:
             saved_count = len(self.data_manager.finished_ids)
         self.counter_var.set(f"已保存: {saved_count}")
-
 
     def _on_ann_list_select(self, event):
         sel = self.ann_listbox.curselection()
