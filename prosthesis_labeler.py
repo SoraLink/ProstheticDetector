@@ -53,7 +53,13 @@ class Config:
         15: 'L-Pros\nAnkle', 16: 'R-Pros\nAnkle',
     }
 
+    # 假肢点集合 (需要设置 Flexibility)
     PROSTHETIC_IDS = {9, 10, 11, 12, 13, 14, 15, 16}
+
+    # [NEW] 上残肢点集合 (允许设置 Skip Knee/Elbow 属性)
+    # 1,2: 上臂残肢 (可跳过机械肘直连手腕)
+    # 5,6: 大腿残肢 (可跳过机械膝直连脚踝 - 刀锋战士)
+    UPPER_RESIDUAL_IDS = {1, 2, 5, 6}
 
     COLORS = {
         1: '#FF0000', 2: '#00FF00', 3: '#FF00FF', 4: '#00FFFF',
@@ -63,10 +69,10 @@ class Config:
     }
 
     BUTTON_LAYOUT = [
-        [1, 2, 9, 10],  # Row 1: Above Elbow Res (L/R) | Pros Elbow (L/R)
-        [3, 4, 11, 12],  # Row 2: Below Elbow Res (L/R) | Pros Wrist (L/R)
-        [5, 6, 13, 14],  # Row 3: Above Knee Res (L/R)  | Pros Knee (L/R)
-        [7, 8, 15, 16]  # Row 4: Below Knee Res (L/R)  | Pros Ankle (L/R)
+        [1, 2, 9, 10],  # Row 1
+        [3, 4, 11, 12],  # Row 2
+        [5, 6, 13, 14],  # Row 3
+        [7, 8, 15, 16]  # Row 4
     ]
 
     COCO_SKELETON = [
@@ -81,90 +87,46 @@ class Config:
     ]
 
     COCO_LEFT_SIDE = {5, 7, 9, 11, 13, 15}
-
     COCO_RIGHT_SIDE = {6, 8, 10, 12, 14, 16}
 
 
 class DataManager:
-    """
-    DataManager class to manage any data which will be used in the annotation process or generated during annotation
-    processes.
-    """
-
+    # ... (保持原有的 DataManager 类代码不变) ...
     def __init__(self):
         self.ld_label_path = None
         self.output_label_path = None
         self.image_dir = None
-
-        # core data
-        self.all_image_ids = []  # sorted id list to be processed
-        self.ld_data_map = {}  # {image_id: (img_info, ld_annotations_list)}
-        self.saved_anns_map = defaultdict(list)  # {image_id: [saved_annotations]}
+        self.all_image_ids = []
+        self.ld_data_map = {}
+        self.saved_anns_map = defaultdict(list)
         self.finished_ids = set()
 
     def set_paths(self, ld_path, out_path, img_dir):
-        """
-        Setting paths for annotation process.
-
-        Args:
-            ld_path: LDpose's annotation path
-            out_path: The path to save the new annotation file
-            img_dir: The path to read images
-
-        Returns:
-            None
-        """
         self.ld_label_path = ld_path
         self.output_label_path = out_path
         self.image_dir = img_dir
 
     def load_data(self):
-        """
-        Retrieve data from the saved path
-
-        Returns:
-            None
-        """
-        # Load original annotation
         ld_anns, ld_imgs = self._load_json(self.ld_label_path)
-        if not ld_imgs:
-            return False
-
-        # LD data by id
+        if not ld_imgs: return False
         self.ld_data_map = {}
-
         temp_ld_anns = defaultdict(list)
         for ann in ld_anns:
             temp_ld_anns[ann.get("image_id")].append(ann)
-
         for img in ld_imgs:
             img_id = img['id']
             if img_id in temp_ld_anns:
                 self.ld_data_map[img_id] = (img, temp_ld_anns[img_id])
-
         self.all_image_ids = sorted(list(self.ld_data_map.keys()))
-
-        # Load the saved new annotation to resume
         saved_anns_list, saved_imgs_list = self._load_json(self.output_label_path)
         self.saved_anns_map = defaultdict(list)
         for ann in saved_anns_list:
             self.saved_anns_map[ann['image_id']].append(ann)
-
         self.finished_ids = {img['id'] for img in (saved_imgs_list or [])}
         return True
 
     def _load_json(self, path) -> Tuple[List, List]:
-        """
-        Load annotation from JSON file
-        Args:
-            path: path to the JSON file
-
-        Returns:
-            List of images Infos
-            List of Annotations
-        """
-        if not path or not path.exists():
-            return [], []
+        if not path or not path.exists(): return [], []
         try:
             with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f)
@@ -175,34 +137,15 @@ class DataManager:
             return [], []
 
     def get_next_todo_index(self) -> int:
-        """
-        Return the index of the next id
-
-        Returns:
-            ID number
-        """
         for i, img_id in enumerate(self.all_image_ids):
-            if img_id not in self.finished_ids:
-                return i
+            if img_id not in self.finished_ids: return i
         return len(self.all_image_ids) - 1 if self.all_image_ids else 0
 
     def get_image_context(self, index: int) -> Dict | None:
-        """
-        Retrieve all context for an image
-        Args:
-            index: The ID of an image.
-
-        Returns:
-            A dict including id, name, path, LD annotations, previous saved annotations and index string.
-        """
-        if index < 0 or index >= len(self.all_image_ids):
-            return None
-
+        if index < 0 or index >= len(self.all_image_ids): return None
         current_id = self.all_image_ids[index]
         img_info, ld_anns = self.ld_data_map[current_id]
-
         saved_anns = self.saved_anns_map.get(current_id, [])
-
         return {
             "id": current_id,
             "file_name": img_info['file_name'],
@@ -213,52 +156,31 @@ class DataManager:
         }
 
     def save_annotation_result(self, current_id, current_labels_map):
-        """
-        Save the annotation result to the disk
-        Args:
-            current_id: Image ID
-            current_labels_map: The content of Annotation {ann_index: {keypoint_id: [x, y, vis]}}
-
-        Returns:
-            The total number of finished annotations
-        """
-        # 1. Read exist annotation
         try:
             with open(self.output_label_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
         except:
             data = {"images": [], "annotations": []}
-
         images = data.get("images", [])
         annotations = data.get("annotations", [])
-
-        # 2. Filter out the current id's corresponding data
         images = [img for img in images if img['id'] != current_id]
         annotations = [ann for ann in annotations if ann['image_id'] != current_id]
-
-        # 3. Retrieve the LD pose annotation of the id.
         img_info, ld_anns = self.ld_data_map[current_id]
-
         has_pro = False
         for person_labels in current_labels_map.values():
             if any(v[2] != -1 for v in person_labels.values()):
                 has_pro = True
                 break
-
         out_img_info = img_info.copy()
         out_img_info["has_pro"] = has_pro
         images.append(out_img_info)
-
-        # 4. Merge annotation
         new_saved_cache = []
-
         if ld_anns:
             for idx, ann in enumerate(ld_anns):
                 out_ann = ann.copy()
                 if idx in current_labels_map:
                     person_labels = current_labels_map[idx]
                     out_ann["new_keypoints"] = dict(person_labels)
-
                 annotations.append(out_ann)
                 new_saved_cache.append(out_ann)
         else:
@@ -270,36 +192,18 @@ class DataManager:
                 }
                 annotations.append(out_ann)
                 new_saved_cache.append(out_ann)
-
-        # 5. Write to the file
         data["images"] = images
         data["annotations"] = annotations
-
         with open(self.output_label_path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=4)
-
-        # 6. Update memory data
         self.finished_ids.add(current_id)
         self.saved_anns_map[current_id] = new_saved_cache
-
         return len(self.finished_ids)
 
 
 class ImageVisualizer:
-    """
-    The ImageVisualizer class response for the
-    """
-
     def render(self, img_path, ld_anns, selected_ann_index, current_labels_map, show_coco_kps=True,
                show_extra_kps=False, show_bbox=True):
-        """
-        img_path: Image path
-        ld_anns: LDpose annotations
-        selected_ann_index: The index of the selected annotations
-        current_labels_map: The current image's annotation {ann_idx: {kp_id: [x,y,v,conn,flex]}}
-        show_coco_kps: Whether to show standard COCO keypoints (0-16)
-        show_extra_kps: Whether to show extra LDpose keypoints (17-24)
-        """
         try:
             img = Image.open(img_path).convert("RGB")
         except Exception as e:
@@ -310,101 +214,84 @@ class ImageVisualizer:
 
         if ld_anns and 0 <= selected_ann_index < len(ld_anns):
             target_ann = ld_anns[selected_ann_index]
-
-            # 1. Draw COCO keypoints/skeleton (0-16)
-            if show_coco_kps:
-                self._draw_coco_keypoints(draw, target_ann)
-
-            # 2. [NEW] Draw Extra keypoints (17-24)
-            if show_extra_kps:
-                self._draw_extra_keypoints(draw, target_ann)
-
-            # 3. Draw bbox
+            if show_coco_kps: self._draw_coco_keypoints(draw, target_ann)
+            if show_extra_kps: self._draw_extra_keypoints(draw, target_ann)
             if show_bbox and "bbox" in target_ann:
                 x, y, w, h = target_ann["bbox"]
                 draw.rectangle([x, y, x + w, y + h], outline="red", width=3)
                 draw.text((x, y - 15), f"ID: {target_ann.get('id')}", fill="red")
 
-        # 4. Drawing the custom keypoints - Top Layer
+        # Draw Points (Top Layer)
         current_person_labels = current_labels_map.get(selected_ann_index, {})
 
         r = 4
         for key_id, val in current_person_labels.items():
-            if not isinstance(val, (list, tuple)) or len(val) < 2:
-                continue
-
+            if not isinstance(val, (list, tuple)) or len(val) < 2: continue
             kx, ky = val[0], val[1]
-
             if kx != -1 and ky != -1:
                 kv = val[2] if len(val) > 2 else -1
                 flex = val[3] if len(val) > 3 else -1
 
-                color = Config.COLORS.get(key_id, 'white')
-                draw.ellipse([kx - r, ky - r, kx + r, ky + r], fill=color, outline='black')
+                # [NEW] 读取 Skip 属性 (Index 4)
+                # 只有上残肢点可能有这个属性
+                is_skip = val[4] if len(val) > 4 else False
 
+                color = Config.COLORS.get(key_id, 'white')
+
+                # 画点
+                draw.ellipse([kx - r, ky - r, kx + r, ky + r], fill=color, outline='black', width=1)
+
+                # 生成标签文字
                 label_text = str(kv)
+
+                # 1. 假肢显示 Fix/Free
                 if key_id in Config.PROSTHETIC_IDS:
                     f_str = "Fix" if flex == 0 else "Free" if flex == 1 else "?"
-                    if flex != -1:
-                        label_text += f"\n{f_str}"
+                    if flex != -1: label_text += f"\n{f_str}"
+
+                # 2. [NEW] 上残肢点如果Skip了中间关节，显示 [S] 标记
+                if is_skip:
+                    label_text += "\n[S]"  # S for Skip
 
                 draw.text((kx + r + 2, ky - r), label_text, fill=color, stroke_fill="black", stroke_width=1)
 
         return ImageTk.PhotoImage(img)
 
-
     def _draw_coco_keypoints(self, draw, ann):
-        """
-        Keypoints format in JSON: [x, y, v, x, y, v, ...]
-        """
         kps = ann.get("keypoints", [])
-        if not kps:
-            return
+        if not kps: return
 
         def get_kp(index):
             idx = index * 3
-            if idx + 2 < len(kps):
-                return kps[idx], kps[idx + 1], kps[idx + 2]
+            if idx + 2 < len(kps): return kps[idx], kps[idx + 1], kps[idx + 2]
             return 0, 0, 0
 
         for i_start, i_end in Config.COCO_SKELETON:
             x1, y1, v1 = get_kp(i_start)
             x2, y2, v2 = get_kp(i_end)
-
-            if v1 > 0 and v2 > 0:
-                draw.line([(x1, y1), (x2, y2)], fill='black', width=2)
-
+            if v1 > 0 and v2 > 0: draw.line([(x1, y1), (x2, y2)], fill='black', width=2)
         r = 3
         for i in range(17):
             x, y, v = get_kp(i)
             if v > 0:
                 draw.ellipse([x - r, y - r, x + r, y + r], fill='black', outline=None)
-                text_pos = (x + 5, y - 5)
-
                 if i in Config.COCO_LEFT_SIDE:
-                    draw.text(text_pos, "L", fill="black")
+                    draw.text((x + 5, y - 5), "L", fill="black")
                 elif i in Config.COCO_RIGHT_SIDE:
-                    draw.text(text_pos, "R", fill="black")
-
+                    draw.text((x + 5, y - 5), "R", fill="black")
 
     def _draw_extra_keypoints(self, draw, ann):
-        """
-        Draw keypoints 17-24 (indices)
-        """
         kps = ann.get("keypoints", [])
-        if not kps:
-            return
+        if not kps: return
 
         def get_kp(index):
             idx = index * 3
-            if idx + 2 < len(kps):
-                return kps[idx], kps[idx + 1], kps[idx + 2]
+            if idx + 2 < len(kps): return kps[idx], kps[idx + 1], kps[idx + 2]
             return 0, 0, 0
 
         r = 4
         for i in range(17, 25):
             x, y, v = get_kp(i)
-
             if v > 0:
                 draw.ellipse([x - r, y - r, x + r, y + r], fill='#00BFFF', outline='white')
                 draw.text((x + 5, y - 5), f"E{i}", fill="#00BFFF")
@@ -415,149 +302,93 @@ class ProsthesisLabelerApp:
         self.master = master
         self.master.title("LD-Prosthesis Labeler")
         self.master.geometry(f"{Config.WINDOW_WIDTH}x{Config.WINDOW_HEIGHT}")
-
         self.data_manager = DataManager()
         self.visualizer = ImageVisualizer()
-
         self.current_img_index = 0
         self.selected_ann_index = 0
         self.selected_keypoint_id = -1
-
         self.runtime_labels = {}
-
         self.show_coco_var = tk.BooleanVar(value=False)
         self.show_extra_var = tk.BooleanVar(value=False)
-        self.show_bbox_var = tk.BooleanVar(value=True)  # [NEW] 默认显示 BBox
+        self.show_bbox_var = tk.BooleanVar(value=True)
 
         if not self._init_paths():
             self.master.destroy()
             return
-
         if not self.data_manager.load_data():
             messagebox.showerror("错误", "无法加载数据文件。")
             self.master.destroy()
             return
-
         self.current_img_index = self.data_manager.get_next_todo_index()
-
         self._setup_ui()
-
         self.master.bind("w", lambda event: self._move_list_selection(-1))
         self.master.bind("s", lambda event: self._move_list_selection(1))
-
         self._load_current_image()
 
     def _init_paths(self):
-        ld_path = filedialog.askopenfilename(
-            title="选择 LDPose annotation (.json)",
-            filetypes=[("JSON", "*.json")],
-            initialdir='./ldpose_final/annotations'
-        )
+        ld_path = filedialog.askopenfilename(title="选择 LDPose annotation (.json)", filetypes=[("JSON", "*.json")],
+                                             initialdir='./ldpose_final/annotations')
         if not ld_path: return False
-
-        out_path = filedialog.asksaveasfilename(
-            title="保存 labels.json 位置",
-            initialfile="labels.json",
-            defaultextension=".json",
-            initialdir='./'
-        )
+        out_path = filedialog.asksaveasfilename(title="保存 labels.json 位置", initialfile="labels.json",
+                                                defaultextension=".json", initialdir='./')
         if not out_path: return False
-
-        img_dir = filedialog.askdirectory(
-            title="选择图片目录",
-            initialdir='./ldpose_final'
-        )
+        img_dir = filedialog.askdirectory(title="选择图片目录", initialdir='./ldpose_final')
         if not img_dir: return False
-
         if not Path(out_path).exists():
-            with open(out_path, "w", encoding="utf-8") as f:
-                json.dump({"images": [], "annotations": []}, f)
-
+            with open(out_path, "w", encoding="utf-8") as f: json.dump({"images": [], "annotations": []}, f)
         self.data_manager.set_paths(Path(ld_path), Path(out_path), Path(img_dir))
         return True
 
     def _move_list_selection(self, step):
-        """
-        移动 Annotation List 的选中项
-        step: -1 表示向上(w), 1 表示向下(s)
-        """
         size = self.ann_listbox.size()
-        if size == 0:
-            return
-
+        if size == 0: return
         current_sel = self.ann_listbox.curselection()
         if not current_sel:
             target_idx = 0
         else:
             target_idx = current_sel[0] + step
-
-        if target_idx < 0:
-            target_idx = 0
-        if target_idx >= size:
-            target_idx = size - 1
-
+        if target_idx < 0: target_idx = 0
+        if target_idx >= size: target_idx = size - 1
         if not current_sel or target_idx != current_sel[0]:
             self.ann_listbox.selection_clear(0, tk.END)
             self.ann_listbox.selection_set(target_idx)
             self.ann_listbox.see(target_idx)
-
             self._on_ann_list_select(None)
 
     def _setup_ui(self):
-        """
-        Set up the UI with Scrollbars for the image
-        """
         paned = tk.PanedWindow(self.master, orient=tk.HORIZONTAL)
         paned.pack(fill=tk.BOTH, expand=True)
-
-        # === Left Frame (Annotation List) ===
         left_frame = tk.Frame(paned, width=250, bg="#f0f0f0")
         paned.add(left_frame)
-
         tk.Label(left_frame, text="Annotations List", font=("Arial", 10, "bold"), bg="#f0f0f0").pack(pady=5)
         list_frame = tk.Frame(left_frame)
         list_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
-
         self.ann_listbox = tk.Listbox(list_frame, font=("Arial", 10), selectmode=tk.SINGLE)
         self.ann_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self.ann_listbox.bind("<<ListboxSelect>>", self._on_ann_list_select)
-
         sb = tk.Scrollbar(list_frame, command=self.ann_listbox.yview)
         sb.pack(side=tk.RIGHT, fill=tk.Y)
         self.ann_listbox.config(yscrollcommand=sb.set)
 
-        # === Right Frame ===
         right_frame = tk.Frame(paned)
         paned.add(right_frame)
-
-        # 1. Bottom Control Panel
         controls_frame = tk.Frame(right_frame, bd=1, relief=tk.RAISED)
         controls_frame.pack(side=tk.BOTTOM, fill=tk.X)
-
-        # 初始化变量 (但不在这里 pack Label，移到 _setup_control_buttons 里面去)
         self.info_var = tk.StringVar()
         self.counter_var = tk.StringVar()
-
-        # 生成控制面板内容
         self._setup_control_buttons(controls_frame)
 
-        # 2. Image Canvas
         image_container = tk.Frame(right_frame, bg="gray")
         image_container.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
-
         self.canvas = tk.Canvas(image_container, bg="#404040")
         v_scroll = tk.Scrollbar(image_container, orient=tk.VERTICAL, command=self.canvas.yview)
         h_scroll = tk.Scrollbar(image_container, orient=tk.HORIZONTAL, command=self.canvas.xview)
-
         v_scroll.pack(side=tk.RIGHT, fill=tk.Y)
         h_scroll.pack(side=tk.BOTTOM, fill=tk.X)
         self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self.canvas.configure(yscrollcommand=v_scroll.set, xscrollcommand=h_scroll.set)
-
         self.image_label = tk.Label(self.canvas, bd=0, highlightthickness=0)
         self.canvas_window = self.canvas.create_window((0, 0), window=self.image_label, anchor="nw")
-
-        # Bind events
         self.image_label.bind("<Configure>", self._on_image_resize)
         self.image_label.bind("<Button-1>", self._on_canvas_click)
         self.image_label.bind('<Enter>', self._bound_to_mousewheel)
@@ -570,7 +401,6 @@ class ProsthesisLabelerApp:
 
     def _bound_to_mousewheel(self, event):
         self.canvas.focus_set()
-
         self.canvas.bind_all("<MouseWheel>", self._on_mousewheel)
         self.canvas.bind_all("<Button-4>", self._on_mousewheel)
         self.canvas.bind_all("<Button-5>", self._on_mousewheel)
@@ -593,124 +423,107 @@ class ProsthesisLabelerApp:
         self.canvas.configure(scrollregion=self.canvas.bbox("all"))
 
     def _setup_control_buttons(self, parent):
-        """
-        在底部的 parent Frame 中：
-        - 左半边：4x4 关键点大按钮
-        - 右半边：信息显示、属性设置、开关、导航
-        """
-        # === 1. 左侧区域：关键点按钮 ===
-        # 使用 Frame 包装，放在左边
         kp_panel = tk.Frame(parent, bd=1, relief=tk.SUNKEN)
         kp_panel.pack(side=tk.LEFT, fill=tk.Y, padx=10, pady=10)
-
-        # 4x4 Grid 配置
         for i in range(4): kp_panel.columnconfigure(i, weight=1)
         for i in range(4): kp_panel.rowconfigure(i, weight=1)
-
         for r, row_ids in enumerate(Config.BUTTON_LAYOUT):
             for c, kp_id in enumerate(row_ids):
-                # 使用短名
                 name = Config.SHORT_NAMES.get(kp_id, Config.KEYPOINTS[kp_id])
                 color = Config.COLORS.get(kp_id, 'black')
+                tk.Button(kp_panel, text=name, fg=color, font=("Arial", 9, "bold"), width=15, height=3, bg="#f9f9f9",
+                          wraplength=100, command=lambda k=kp_id: self._set_tool_keypoint(k)).grid(row=r, column=c,
+                                                                                                   padx=2, pady=2,
+                                                                                                   sticky="nsew")
 
-                tk.Button(
-                    kp_panel,
-                    text=name,
-                    fg=color,
-                    font=("Arial", 9, "bold"),
-                    width=15,  # 增加宽度
-                    height=3,  # 增加高度
-                    bg="#f9f9f9",
-                    wraplength=100,
-                    command=lambda k=kp_id: self._set_tool_keypoint(k)
-                ).grid(row=r, column=c, padx=2, pady=2, sticky="nsew")
-
-        # === 2. 右侧区域：其他所有功能 ===
         tools_panel = tk.Frame(parent)
         tools_panel.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=10, pady=5)
-
-        # (A) 信息显示 (移到这里)
         info_frame = tk.Frame(tools_panel)
         info_frame.pack(fill=tk.X, pady=5)
         tk.Label(info_frame, textvariable=self.info_var, font=("Arial", 10)).pack(side=tk.LEFT)
         tk.Label(info_frame, textvariable=self.counter_var, font=("Arial", 11, "bold"), fg="blue").pack(side=tk.RIGHT)
+        tk.Frame(tools_panel, height=2, bd=1, relief=tk.GROOVE).pack(fill=tk.X, pady=5)
 
-        tk.Frame(tools_panel, height=2, bd=1, relief=tk.GROOVE).pack(fill=tk.X, pady=5)  # 分割线
-
-        # (B) 属性设置 (Vis & Flex)
         attr_frame = tk.Frame(tools_panel)
         attr_frame.pack(fill=tk.X, pady=5)
+        tk.Label(attr_frame, text="Vis:").pack(side=tk.LEFT)
+        tk.Button(attr_frame, text="Occ(1)", width=5, command=lambda: self._set_tool_vis(1)).pack(side=tk.LEFT, padx=2)
+        tk.Button(attr_frame, text="Vis(2)", width=5, command=lambda: self._set_tool_vis(2)).pack(side=tk.LEFT, padx=2)
+        tk.Label(attr_frame, text="| Flex:").pack(side=tk.LEFT, padx=5)
+        tk.Button(attr_frame, text="Fix(0)", width=5, command=lambda: self._set_attr_flex(0)).pack(side=tk.LEFT, padx=2)
+        tk.Button(attr_frame, text="Free(1)", width=5, command=lambda: self._set_attr_flex(1)).pack(side=tk.LEFT,
+                                                                                                    padx=2)
 
-        tk.Label(attr_frame, text="Visibility:").pack(side=tk.LEFT)
-        tk.Button(attr_frame, text="Occluded (1)", command=lambda: self._set_tool_vis(1)).pack(side=tk.LEFT, padx=5)
-        tk.Button(attr_frame, text="Visible (2)", command=lambda: self._set_tool_vis(2)).pack(side=tk.LEFT, padx=5)
+        # === [NEW] Skip Joint Checkbox ===
+        # 默认只有在上残肢点 (1,2,5,6) 选中时才显示
+        self.skip_joint_var = tk.BooleanVar(value=False)
+        self.chk_skip_joint = tk.Checkbutton(
+            attr_frame,
+            text="Skip Knee/Elbow",
+            variable=self.skip_joint_var,
+            command=self._on_skip_toggle,
+            fg="red", font=("Arial", 9, "bold")
+        )
+        # 初始不 Pack, 动态显示
 
-        tk.Label(attr_frame, text="| Flexibility:").pack(side=tk.LEFT, padx=10)
-        tk.Button(attr_frame, text="Fixed (0)", command=lambda: self._set_attr_flex(0)).pack(side=tk.LEFT, padx=5)
-        tk.Button(attr_frame, text="Free (1)", command=lambda: self._set_attr_flex(1)).pack(side=tk.LEFT, padx=5)
+        tk.Button(attr_frame, text="Clear", bg="#ffcccc", command=self._clear_current_point).pack(side=tk.RIGHT, padx=5)
 
-        tk.Button(attr_frame, text="Clear Point", bg="#ffcccc", command=self._clear_current_point).pack(side=tk.RIGHT,
-                                                                                                        padx=10)
-
-        # (C) 显示开关 (Toggles)
         toggle_frame = tk.Frame(tools_panel)
         toggle_frame.pack(fill=tk.X, pady=5)
-
         self.btn_toggle_coco = tk.Button(toggle_frame, text="显示原始 COCO", command=self._toggle_coco_display)
         self.btn_toggle_coco.pack(side=tk.LEFT, padx=5, expand=True, fill=tk.X)
-
         self.btn_toggle_extra = tk.Button(toggle_frame, text="显示残肢点", command=self._toggle_extra_display)
         self.btn_toggle_extra.pack(side=tk.LEFT, padx=5, expand=True, fill=tk.X)
-
-        # 默认显示 BBox，按钮初始为'隐藏'
         self.btn_toggle_bbox = tk.Button(toggle_frame, text="隐藏 BBox", relief="sunken", bg="#FFCCCB",
                                          command=self._toggle_bbox_display)
         self.btn_toggle_bbox.pack(side=tk.LEFT, padx=5, expand=True, fill=tk.X)
         self.default_btn_bg = self.btn_toggle_coco.cget("bg")
 
-        # (D) 导航按钮 (Navigation)
         nav_frame = tk.Frame(tools_panel)
         nav_frame.pack(fill=tk.X, pady=10)
+        tk.Button(nav_frame, text="< Previous", height=2, command=self._prev_image).pack(side=tk.LEFT, fill=tk.X,
+                                                                                         expand=True, padx=20)
+        tk.Button(nav_frame, text="Next >", height=2, bg="#ddffdd", command=self._next_image).pack(side=tk.LEFT,
+                                                                                                   fill=tk.X,
+                                                                                                   expand=True, padx=20)
 
-        tk.Button(nav_frame, text="< Previous Image", height=2, command=self._prev_image).pack(side=tk.LEFT, fill=tk.X,
-                                                                                               expand=True, padx=20)
-        tk.Button(nav_frame, text="Next Image >", height=2, bg="#ddffdd", command=self._next_image).pack(side=tk.LEFT,
-                                                                                                         fill=tk.X,
-                                                                                                         expand=True,
-                                                                                                         padx=20)
+    # === [NEW] Skip Toggle Logic ===
+    def _on_skip_toggle(self):
+        # 只有上残肢点才允许此操作
+        if self.selected_keypoint_id not in Config.UPPER_RESIDUAL_IDS: return
+
+        val = self.skip_joint_var.get()
+        if self.selected_ann_index not in self.runtime_labels:
+            self.runtime_labels[self.selected_ann_index] = defaultdict(lambda: [-1, -1, -1, -1, False])
+
+        # 数据结构: [x, y, vis, flex, skip_bool]
+        point_data = self.runtime_labels[self.selected_ann_index][self.selected_keypoint_id]
+        while len(point_data) < 5: point_data.append(False)
+        point_data[4] = val
+        self._refresh_canvas()
 
     def _toggle_bbox_display(self):
         new_val = not self.show_bbox_var.get()
         self.show_bbox_var.set(new_val)
-
-        if new_val:
-            self.btn_toggle_bbox.config(text="隐藏 BBox 框", relief="sunken", bg="#FFCCCB")
-        else:
-            self.btn_toggle_bbox.config(text="显示 BBox 框", relief="raised", bg=self.default_btn_bg)
-
+        self.btn_toggle_bbox.config(text="隐藏 BBox" if new_val else "显示 BBox",
+                                    relief="sunken" if new_val else "raised",
+                                    bg="#FFCCCB" if new_val else self.default_btn_bg)
         self._refresh_canvas()
 
     def _toggle_extra_display(self):
         new_val = not self.show_extra_var.get()
         self.show_extra_var.set(new_val)
-
-        if new_val:
-            self.btn_toggle_extra.config(text="隐藏残肢参考点 (17-24)", relief="sunken", bg="#ADD8E6")  # 亮蓝色背景提示
-        else:
-            self.btn_toggle_extra.config(text="显示残肢参考点 (17-24)", relief="raised", bg=self.default_btn_bg)
-
+        self.btn_toggle_extra.config(text="隐藏残肢点" if new_val else "显示残肢点",
+                                     relief="sunken" if new_val else "raised",
+                                     bg="#ADD8E6" if new_val else self.default_btn_bg)
         self._refresh_canvas()
 
     def _toggle_coco_display(self):
-        """Toggle the COCO keypoint display state"""
         new_val = not self.show_coco_var.get()
         self.show_coco_var.set(new_val)
-
-        if new_val:
-            self.btn_toggle_coco.config(text="隐藏原始 COCO 骨架", relief="sunken", bg="#ddd")
-        else:
-            self.btn_toggle_coco.config(text="显示原始 COCO 骨架", relief="raised", bg=self.default_btn_bg)
-
+        self.btn_toggle_coco.config(text="隐藏 COCO" if new_val else "显示 COCO",
+                                    relief="sunken" if new_val else "raised",
+                                    bg="#ddd" if new_val else self.default_btn_bg)
         self._refresh_canvas()
 
     def _set_attr_flex(self, val):
@@ -718,101 +531,68 @@ class ProsthesisLabelerApp:
         if self.selected_keypoint_id <= 8:
             messagebox.showwarning("提示", "人体残肢点不需要设置自由度")
             return
-
         if self.selected_ann_index not in self.runtime_labels:
             self.runtime_labels[self.selected_ann_index] = defaultdict(lambda: [-1, -1, -1, -1])
-
         data = self.runtime_labels[self.selected_ann_index][self.selected_keypoint_id]
-
         while len(data) < 4: data.append(-1)
         data[3] = val
-
         self._refresh_canvas()
 
     def _load_current_image(self):
-        """
-        Load the current image
-        Returns:
-            None
-        """
         ctx = self.data_manager.get_image_context(self.current_img_index)
         if not ctx:
             messagebox.showinfo("完成", "没有更多图片或索引越界。")
             return
-
-        # 1. Reset params
         self.runtime_labels = {}
         self.selected_keypoint_id = -1
         self.selected_ann_index = 0
-
-        # 2. Restore the annotation
         self._reconstruct_runtime_state(ctx)
-
-        # 3. Refresh the list
         self.ann_listbox.delete(0, tk.END)
         ld_anns = ctx['ld_anns']
-
         if ld_anns:
             for idx, ann in enumerate(ld_anns):
                 self.ann_listbox.insert(tk.END, f"#{idx} - ID:{ann.get('id')} (Cat:{ann.get('category_id')})")
             self.ann_listbox.selection_set(0)
         else:
             self.ann_listbox.insert(tk.END, "No Annotations (New)")
-            if 0 not in self.runtime_labels:
-                self.runtime_labels[0] = defaultdict(lambda: [-1, -1, -1])
-
+            if 0 not in self.runtime_labels: self.runtime_labels[0] = defaultdict(lambda: [-1, -1, -1])
         rel_path = ctx['full_path'].relative_to(self.data_manager.image_dir).as_posix()
         self.info_var.set(f"{ctx['index_str']} : {rel_path}")
         self._update_counter()
-
         self._refresh_canvas()
 
     def _reconstruct_runtime_state(self, ctx):
-        """
-        Reconstruct the state using saved annotation
-        """
         saved_anns = ctx['saved_anns']
         ld_anns = ctx['ld_anns']
-
         id_to_idx = {ann['id']: i for i, ann in enumerate(ld_anns)}
-
         for s_ann in saved_anns:
             if "new_keypoints" not in s_ann: continue
-
             target_idx = None
             if s_ann.get('id') in id_to_idx:
                 target_idx = id_to_idx[s_ann['id']]
             elif not ld_anns:
                 target_idx = 0
-
             if target_idx is not None:
-                recovered_data = defaultdict(lambda: [-1, -1, -1])
+                # 恢复数据，确保长度为 5 [x, y, vis, flex, skip_bool]
+                recovered_data = defaultdict(lambda: [-1, -1, -1, -1, False])
                 for k, v in s_ann["new_keypoints"].items():
-                    recovered_data[int(k)] = v
+                    val_list = v.copy()
+                    while len(val_list) < 5:
+                        val_list.append(False if len(val_list) == 4 else -1)
+                    recovered_data[int(k)] = val_list
                 self.runtime_labels[target_idx] = recovered_data
-
         if self.selected_ann_index not in self.runtime_labels:
-            self.runtime_labels[self.selected_ann_index] = defaultdict(lambda: [-1, -1, -1])
+            self.runtime_labels[self.selected_ann_index] = defaultdict(lambda: [-1, -1, -1, -1, False])
 
     def _refresh_canvas(self):
-        """
-        Refresh the canvas to draw the current image and annotation
-        Returns:
-            None
-        """
         ctx = self.data_manager.get_image_context(self.current_img_index)
         if not ctx: return
-
         tk_img = self.visualizer.render(
-            ctx['full_path'],
-            ctx['ld_anns'],
-            self.selected_ann_index,
-            self.runtime_labels,
+            ctx['full_path'], ctx['ld_anns'], self.selected_ann_index, self.runtime_labels,
             show_coco_kps=self.show_coco_var.get(),
             show_extra_kps=self.show_extra_var.get(),
             show_bbox=self.show_bbox_var.get()
         )
-
         if tk_img:
             self.tk_img_ref = tk_img
             self.image_label.config(image=tk_img)
@@ -820,66 +600,31 @@ class ProsthesisLabelerApp:
     def _validate_before_save(self):
         for ann_idx, kps in self.runtime_labels.items():
             for kp_id, val in kps.items():
-                if not isinstance(val, list) or len(val) < 2:
-                    continue
-
+                if not isinstance(val, list) or len(val) < 2: continue
                 x, y = val[0], val[1]
-
-                if x == -1 or y == -1:
-                    continue
-
+                if x == -1 or y == -1: continue
                 kp_name = Config.KEYPOINTS.get(kp_id, f"ID {kp_id}")
-
                 vis = val[2] if len(val) > 2 else -1
                 if vis == -1:
-                    msg = f"保存失败：标注不完整\n人物#{ann_idx}, 点: {kp_name}\n请设置可见性 (Vis)。"
-                    messagebox.showerror("校验错误", msg)
+                    messagebox.showerror("校验错误", f"#{ann_idx} {kp_name}: 请设置可见性 (Vis)。")
                     return False
-
                 if kp_id in Config.PROSTHETIC_IDS:
                     flex = val[3] if len(val) > 3 else -1
-
                     if flex == -1:
-                        msg = f"保存失败：标注不完整\n人物#{ann_idx}, 点: {kp_name}\n是假肢点，请设置 'Flexibility' (Fixed/Free)。"
-                        messagebox.showerror("校验错误", msg)
+                        messagebox.showerror("校验错误", f"#{ann_idx} {kp_name}: 是假肢点，请设置 'Flex'。")
                         return False
-
         return True
 
     def _save_current(self):
-        """
-        Save the current image's annotation
-        Returns:
-            Boolean: True if the annotation is saved, False otherwise
-        """
-
-        if not self._validate_before_save():
-            return False
-
+        if not self._validate_before_save(): return False
         ctx = self.data_manager.get_image_context(self.current_img_index)
         if not ctx: return True
-
         count = self.data_manager.save_annotation_result(ctx['id'], self.runtime_labels)
         self._update_counter(saved_count=count)
         return True
 
-    def _has_valid_data(self):
-        """
-        Check if there is any valid data in the canvas
-        """
-        if not self.runtime_labels:
-            return False
-
-        for person_labels in self.runtime_labels.values():
-            for val in person_labels.values():
-                if isinstance(val, list) and len(val) >= 2:
-                    if val[0] != -1 and val[1] != -1:
-                        return True
-        return False
-
     def _update_counter(self, saved_count=None):
-        if saved_count is None:
-            saved_count = len(self.data_manager.finished_ids)
+        if saved_count is None: saved_count = len(self.data_manager.finished_ids)
         self.counter_var.set(f"已保存: {saved_count}")
 
     def _on_ann_list_select(self, event):
@@ -888,35 +633,40 @@ class ProsthesisLabelerApp:
             idx = sel[0]
             if idx != self.selected_ann_index:
                 self.selected_ann_index = idx
-                if idx not in self.runtime_labels:
-                    self.runtime_labels[idx] = defaultdict(lambda: [-1, -1, -1])
+                if idx not in self.runtime_labels: self.runtime_labels[idx] = defaultdict(lambda: [-1, -1, -1])
                 self._refresh_canvas()
 
     def _on_canvas_click(self, event):
         if self.selected_keypoint_id < 0:
             messagebox.showwarning("提示", "请先选择一个关键点按钮。")
             return
-
         if self.selected_ann_index not in self.runtime_labels:
             self.runtime_labels[self.selected_ann_index] = defaultdict(lambda: [-1, -1, -1])
-
         current_points = self.runtime_labels[self.selected_ann_index]
         current_points[self.selected_keypoint_id][0] = event.x
         current_points[self.selected_keypoint_id][1] = event.y
-
         self._refresh_canvas()
 
     def _set_tool_keypoint(self, kp_id):
         self.selected_keypoint_id = kp_id
 
+        # [NEW] 只有选中的是上残肢点 (1,2,5,6) 时，才显示 "Skip Knee/Elbow" Checkbox
+        if kp_id in Config.UPPER_RESIDUAL_IDS:
+            self.chk_skip_joint.pack(side=tk.LEFT, padx=10)
+            is_skip = False
+            if self.selected_ann_index in self.runtime_labels:
+                data = self.runtime_labels[self.selected_ann_index].get(kp_id, [])
+                if len(data) > 4: is_skip = data[4]
+            self.skip_joint_var.set(is_skip)
+        else:
+            self.chk_skip_joint.pack_forget()
+
     def _set_tool_vis(self, vis):
         if self.selected_keypoint_id < 0:
             messagebox.showwarning("提示", "请先选择关键点。")
             return
-
         if self.selected_ann_index not in self.runtime_labels:
             self.runtime_labels[self.selected_ann_index] = defaultdict(lambda: [-1, -1, -1])
-
         self.runtime_labels[self.selected_ann_index][self.selected_keypoint_id][2] = vis
         self._refresh_canvas()
 
@@ -927,8 +677,7 @@ class ProsthesisLabelerApp:
                 self._refresh_canvas()
 
     def _prev_image(self):
-        if not self._save_current():
-            return
+        if not self._save_current(): return
         if self.current_img_index > 0:
             self.current_img_index -= 1
             self._load_current_image()
