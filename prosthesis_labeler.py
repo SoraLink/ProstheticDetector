@@ -442,6 +442,9 @@ class ProsthesisLabelerApp:
 
         self._setup_ui()
 
+        self.master.bind("w", lambda event: self._move_list_selection(-1))
+        self.master.bind("s", lambda event: self._move_list_selection(1))
+
         self._load_current_image()
 
     def _init_paths(self):
@@ -472,6 +475,33 @@ class ProsthesisLabelerApp:
 
         self.data_manager.set_paths(Path(ld_path), Path(out_path), Path(img_dir))
         return True
+
+    def _move_list_selection(self, step):
+        """
+        移动 Annotation List 的选中项
+        step: -1 表示向上(w), 1 表示向下(s)
+        """
+        size = self.ann_listbox.size()
+        if size == 0:
+            return
+
+        current_sel = self.ann_listbox.curselection()
+        if not current_sel:
+            target_idx = 0
+        else:
+            target_idx = current_sel[0] + step
+
+        if target_idx < 0:
+            target_idx = 0
+        if target_idx >= size:
+            target_idx = size - 1
+
+        if not current_sel or target_idx != current_sel[0]:
+            self.ann_listbox.selection_clear(0, tk.END)
+            self.ann_listbox.selection_set(target_idx)
+            self.ann_listbox.see(target_idx)
+
+            self._on_ann_list_select(None)
 
     def _setup_ui(self):
         """
