@@ -8,6 +8,7 @@ from typing import List, Tuple, Dict
 from PIL import Image, ImageTk, ImageDraw
 
 
+# ... (Config 类保持不变，此处省略以节省篇幅) ...
 class Config:
     """
     Config class. Set window size, keypoint name and colors for anaotation display
@@ -15,26 +16,21 @@ class Config:
     WINDOW_WIDTH = 1400
     WINDOW_HEIGHT = 900
 
+    # ... (原 Config 内容保持不变) ...
+
     KEYPOINTS = {
-        # === Upper Body Residuals ===
         1: 'Above left elbow residual limb end',
         2: 'Above right elbow residual limb end',
         3: 'Below left elbow residual limb end',
         4: 'Below right elbow residual limb end',
-
-        # === Lower Body Residuals ===
         5: 'Above left knee residual limb end',
         6: 'Above right knee residual limb end',
         7: 'Below left knee residual limb end',
         8: 'Below right knee residual limb end',
-
-        # === Upper Body Prosthetics ===
         9: 'Left prosthetic elbow',
         10: 'Right prosthetic elbow',
         11: 'Left prosthetic wrist',
         12: 'Right prosthetic wrist',
-
-        # === Lower Body Prosthetics ===
         13: 'Left prosthetic knee',
         14: 'Right prosthetic knee',
         15: 'Left prosthetic ankle',
@@ -52,30 +48,23 @@ class Config:
         15: 'L-Pros\nAnkle', 16: 'R-Pros\nAnkle',
     }
 
-    # Prosthetic points set (requires Flexibility setting)
     PROSTHETIC_IDS = {9, 10, 11, 12, 13, 14, 15, 16}
-
-    # Upper residual limb points (allow Skip Knee/Elbow attribute setting)
     UPPER_RESIDUAL_IDS = {1, 2, 5, 6}
-
     COLORS = {
         1: '#FF0000', 2: '#00FF00', 3: '#FF00FF', 4: '#00FFFF',
         5: '#A52A2A', 6: '#FFC0CB', 7: '#000080', 8: '#8B4513',
         9: '#0000FF', 10: '#B8860B', 11: '#FFA500', 12: '#800080',
         13: '#808000', 14: '#008080', 15: '#DC143C', 16: '#4B0082',
     }
-
     BUTTON_LAYOUT = [
         [1, 2, 9, 10], [3, 4, 11, 12], [5, 6, 13, 14], [7, 8, 15, 16]
     ]
-
     COCO_SKELETON = [
         (0, 1), (0, 2), (1, 3), (2, 4), (5, 6), (5, 7), (7, 9), (6, 8), (8, 10),
         (11, 12), (11, 13), (13, 15), (12, 14), (14, 16), (5, 11), (6, 12)
     ]
     COCO_LEFT_SIDE = {5, 7, 9, 11, 13, 15}
     COCO_RIGHT_SIDE = {6, 8, 10, 12, 14, 16}
-
     PROSTHETIC_CONNECTIONS = [
         (1, 9), (9, 11), (3, 11),
         (2, 10), (10, 12), (4, 12),
@@ -84,6 +73,7 @@ class Config:
     ]
 
 
+# ... (DataManager 类保持不变，此处省略) ...
 class DataManager:
     def __init__(self):
         self.ld_label_path = None
@@ -205,14 +195,16 @@ class DataManager:
 
 
 class ImageVisualizer:
+    # 修改：增加 scale 参数，默认 1.0
     def render(self, img_path, ld_anns, selected_ann_index, current_labels_map, show_coco_kps=True,
-               show_extra_kps=False, show_bbox=True, show_connections=True):
+               show_extra_kps=False, show_bbox=True, show_connections=True, scale=1.0):
         try:
             img = Image.open(img_path).convert("RGB")
         except Exception as e:
             print(f"Unable to open image: {img_path}, Error: {e}")
             return None
 
+        # 1. 所有的绘制操作（Line, Ellipse, Text）都基于原图尺寸坐标
         draw = ImageDraw.Draw(img)
 
         if ld_anns and 0 <= selected_ann_index < len(ld_anns):
@@ -229,18 +221,18 @@ class ImageVisualizer:
         if show_connections:
             self._draw_prosthetic_connections(draw, current_person_labels)
 
-        r = 4
+        r = 6  # 稍微增大一点半径，防止缩放后太小
         for key_id, val in current_person_labels.items():
             if not isinstance(val, (list, tuple)) or len(val) < 2: continue
             if val[0] == -1: continue
 
-            kx, ky = val[0], val[1]
+            kx, ky = val[0], val[1]  # 这些都是原图坐标
             kv = val[2] if len(val) > 2 else -1
             flex = val[3] if len(val) > 3 else -1
             is_skip = val[4] if len(val) > 4 else False
 
             color = Config.COLORS.get(key_id, 'white')
-            draw.ellipse([kx - r, ky - r, kx + r, ky + r], fill=color, outline='black', width=1)
+            draw.ellipse([kx - r, ky - r, kx + r, ky + r], fill=color, outline='black', width=2)
 
             label_text = str(kv)
             if key_id in Config.PROSTHETIC_IDS:
@@ -250,7 +242,16 @@ class ImageVisualizer:
             if is_skip:
                 label_text += "\n[S]"
 
+            # 字体大小这里没有动态调整，如果图片极大被缩小很多，字可能会看不清
+            # 但保证了坐标是对的
             draw.text((kx + r + 2, ky - r), label_text, fill=color, stroke_fill="black", stroke_width=1)
+
+        # 2. 绘制完成后，根据 scale 进行整体缩放
+        if scale != 1.0:
+            new_w = int(img.width * scale)
+            new_h = int(img.height * scale)
+            # 使用 LANCZOS 保证缩放质量，如果觉得卡顿可以改用 Image.Resampling.BILINEAR
+            img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
 
         return ImageTk.PhotoImage(img)
 
@@ -325,6 +326,9 @@ class ProsthesisLabelerApp:
         self.selected_keypoint_id = -1
         self.runtime_labels = {}
 
+        # [NEW] 缩放因子
+        self.scale = 1.0
+
         # View States
         self.show_coco_var = tk.BooleanVar(value=False)
         self.show_extra_var = tk.BooleanVar(value=False)
@@ -342,7 +346,9 @@ class ProsthesisLabelerApp:
         self._setup_ui()
         self.master.bind("w", lambda event: self._move_list_selection(-1))
         self.master.bind("s", lambda event: self._move_list_selection(1))
-        self._load_current_image()
+
+        # 在 UI setup 之后加载图片，因为计算自适应需要 canvas 尺寸
+        self.master.after(100, self._load_current_image)
 
     def _init_paths(self):
         ld_path = filedialog.askopenfilename(title="Select LDPose annotation (.json)", filetypes=[("JSON", "*.json")],
@@ -407,21 +413,26 @@ class ProsthesisLabelerApp:
         h_scroll.pack(side=tk.BOTTOM, fill=tk.X)
         self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self.canvas.configure(yscrollcommand=v_scroll.set, xscrollcommand=h_scroll.set)
+
+        # 注意：这里我们让 Label 在左上角 'nw' 锚点
         self.image_label = tk.Label(self.canvas, bd=0, highlightthickness=0)
         self.canvas_window = self.canvas.create_window((0, 0), window=self.image_label, anchor="nw")
-        self.image_label.bind("<Configure>", self._on_image_resize)
+
+        # 事件绑定
         self.image_label.bind("<Button-1>", self._on_canvas_click)
         self.image_label.bind('<Enter>', self._bound_to_mousewheel)
         self.canvas.bind('<Enter>', self._bound_to_mousewheel)
         self.image_label.bind('<Leave>', self._unbound_to_mousewheel)
         self.canvas.bind('<Leave>', self._unbound_to_mousewheel)
-        self.canvas.bind_all("<MouseWheel>", self._on_mousewheel)
-        self.canvas.bind_all("<Button-4>", self._on_mousewheel)
-        self.canvas.bind_all("<Button-5>", self._on_mousewheel)
+
+        # 初始 Scrollregion
+        self.image_label.bind("<Configure>", self._on_image_resize)
 
     def _bound_to_mousewheel(self, event):
         self.canvas.focus_set()
+        # Windows / MacOS
         self.canvas.bind_all("<MouseWheel>", self._on_mousewheel)
+        # Linux
         self.canvas.bind_all("<Button-4>", self._on_mousewheel)
         self.canvas.bind_all("<Button-5>", self._on_mousewheel)
 
@@ -431,18 +442,42 @@ class ProsthesisLabelerApp:
         self.canvas.unbind_all("<Button-5>")
 
     def _on_mousewheel(self, event):
-        if event.num == 4:
-            self.canvas.yview_scroll(-1, "units")
-        elif event.num == 5:
-            self.canvas.yview_scroll(1, "units")
+        # 检查是否按下了 Alt 键 (event.state 131072 通常是 Alt，不同系统可能不同)
+        # 更通用的做法是检查位掩码，但在 Tkinter 中简易方法是：
+        is_alt_pressed = (event.state & 0x20000) or (event.state == 131072) or (event.state == 262152)  # 兼容部分 Linux/Win
+
+        # 如果你的系统 Alt 键没反应，可以尝试把下面的条件改成 True 来测试，或者打印 event.state
+        if is_alt_pressed:
+            # === 执行缩放 ===
+            if event.num == 4 or event.delta > 0:
+                self._zoom_image(1.1)  # 放大 10%
+            elif event.num == 5 or event.delta < 0:
+                self._zoom_image(0.9)  # 缩小 10%
         else:
-            delta = int(-1 * (event.delta / 120))
-            self.canvas.yview_scroll(delta, "units")
+            # === 执行滚动 ===
+            if event.num == 4:
+                self.canvas.yview_scroll(-1, "units")
+            elif event.num == 5:
+                self.canvas.yview_scroll(1, "units")
+            else:
+                delta = int(-1 * (event.delta / 120))
+                self.canvas.yview_scroll(delta, "units")
+
+    def _zoom_image(self, factor):
+        new_scale = self.scale * factor
+        # 限制缩放范围，例如最小 0.1 倍，最大 5 倍
+        if new_scale < 0.1: new_scale = 0.1
+        if new_scale > 5.0: new_scale = 5.0
+
+        self.scale = new_scale
+        self._refresh_canvas()
 
     def _on_image_resize(self, event):
         self.canvas.configure(scrollregion=self.canvas.bbox("all"))
 
     def _setup_control_buttons(self, parent):
+        # ... (按钮布局代码保持不变，省略以节省篇幅) ...
+        # 此处复制粘贴原有的 _setup_control_buttons 内容即可
         kp_panel = tk.Frame(parent, bd=1, relief=tk.SUNKEN)
         kp_panel.pack(side=tk.LEFT, fill=tk.Y, padx=10, pady=10)
         for i in range(4): kp_panel.columnconfigure(i, weight=1)
@@ -616,6 +651,30 @@ class ProsthesisLabelerApp:
         rel_path = ctx['full_path'].relative_to(self.data_manager.image_dir).as_posix()
         self.info_var.set(f"{ctx['index_str']} : {rel_path}")
         self._update_counter()
+
+        # [NEW] 自适应缩放逻辑
+        try:
+            with Image.open(ctx['full_path']) as temp_img:
+                img_w, img_h = temp_img.size
+
+            # 获取当前 canvas 的可见尺寸
+            canvas_w = self.canvas.winfo_width()
+            canvas_h = self.canvas.winfo_height()
+
+            # 如果 canvas 还没显示出来，给个默认值防止除0
+            if canvas_w < 50: canvas_w = 800
+            if canvas_h < 50: canvas_h = 600
+
+            scale_w = canvas_w / img_w
+            scale_h = canvas_h / img_h
+
+            # 只有当图片比画布大时才缩小 (scale < 1)，或者你想始终适应屏幕就去掉 min(..., 1.0)
+            self.scale = min(scale_w, scale_h, 1.0)
+
+        except Exception as e:
+            print(f"Error calculating scale: {e}")
+            self.scale = 1.0
+
         self._refresh_canvas()
 
     def _reconstruct_runtime_state(self, ctx):
@@ -643,12 +702,14 @@ class ProsthesisLabelerApp:
     def _refresh_canvas(self):
         ctx = self.data_manager.get_image_context(self.current_img_index)
         if not ctx: return
+        # 传递 self.scale 给 visualizer
         tk_img = self.visualizer.render(
             ctx['full_path'], ctx['ld_anns'], self.selected_ann_index, self.runtime_labels,
             show_coco_kps=self.show_coco_var.get(),
             show_extra_kps=self.show_extra_var.get(),
             show_bbox=self.show_bbox_var.get(),
-            show_connections=self.show_connection_var.get()
+            show_connections=self.show_connection_var.get(),
+            scale=self.scale  # [NEW]
         )
         if tk_img:
             self.tk_img_ref = tk_img
@@ -716,8 +777,12 @@ class ProsthesisLabelerApp:
         if self.selected_keypoint_id not in current_points:
             current_points[self.selected_keypoint_id] = [-1, -1, -1, -1, False]
 
-        current_points[self.selected_keypoint_id][0] = event.x
-        current_points[self.selected_keypoint_id][1] = event.y
+        # [NEW] 坐标转换：点击的坐标是缩放后的，除以 scale 还原为真实坐标
+        real_x = int(event.x / self.scale)
+        real_y = int(event.y / self.scale)
+
+        current_points[self.selected_keypoint_id][0] = real_x
+        current_points[self.selected_keypoint_id][1] = real_y
         self._refresh_canvas()
 
     def _set_tool_keypoint(self, kp_id):
