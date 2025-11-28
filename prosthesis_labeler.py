@@ -53,12 +53,12 @@ class Config:
         15: 'L-Pros\nAnkle', 16: 'R-Pros\nAnkle',
     }
 
-    # 假肢点集合 (需要设置 Flexibility)
+    # Prosthetic points set (requires Flexibility setting)
     PROSTHETIC_IDS = {9, 10, 11, 12, 13, 14, 15, 16}
 
-    # [NEW] 上残肢点集合 (允许设置 Skip Knee/Elbow 属性)
-    # 1,2: 上臂残肢 (可跳过机械肘直连手腕)
-    # 5,6: 大腿残肢 (可跳过机械膝直连脚踝 - 刀锋战士)
+    # [NEW] Upper residual limb points (allow Skip Knee/Elbow attribute setting)
+    # 1,2: Upper arm residual (can skip mechanical elbow to connect wrist directly)
+    # 5,6: Thigh residual (can skip mechanical knee to connect ankle directly - Blade Runner style)
     UPPER_RESIDUAL_IDS = {1, 2, 5, 6}
 
     COLORS = {
@@ -69,29 +69,18 @@ class Config:
     }
 
     BUTTON_LAYOUT = [
-        [1, 2, 9, 10],  # Row 1
-        [3, 4, 11, 12],  # Row 2
-        [5, 6, 13, 14],  # Row 3
-        [7, 8, 15, 16]  # Row 4
+        [1, 2, 9, 10], [3, 4, 11, 12], [5, 6, 13, 14], [7, 8, 15, 16]
     ]
 
     COCO_SKELETON = [
-        (0, 1), (0, 2), (1, 3), (2, 4),
-        (5, 6),
-        (5, 7), (7, 9),
-        (6, 8), (8, 10),
-        (11, 12),
-        (11, 13), (13, 15),
-        (12, 14), (14, 16),
-        (5, 11), (6, 12)
+        (0, 1), (0, 2), (1, 3), (2, 4), (5, 6), (5, 7), (7, 9), (6, 8), (8, 10),
+        (11, 12), (11, 13), (13, 15), (12, 14), (14, 16), (5, 11), (6, 12)
     ]
-
     COCO_LEFT_SIDE = {5, 7, 9, 11, 13, 15}
     COCO_RIGHT_SIDE = {6, 8, 10, 12, 14, 16}
 
 
 class DataManager:
-    # ... (保持原有的 DataManager 类代码不变) ...
     def __init__(self):
         self.ld_label_path = None
         self.output_label_path = None
@@ -156,35 +145,50 @@ class DataManager:
         }
 
     def save_annotation_result(self, current_id, current_labels_map):
+        """
+        [MODIFIED] Strict save logic:
+        1. Filter out all invalid points where x == -1.
+        2. If a Person has no valid points, do not save new_keypoints.
+        3. Recalculate has_pro.
+        """
+        # Note: The current_labels_map here must be cleaned (containing no -1 data)
         try:
             with open(self.output_label_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
         except:
             data = {"images": [], "annotations": []}
+
         images = data.get("images", [])
         annotations = data.get("annotations", [])
         images = [img for img in images if img['id'] != current_id]
         annotations = [ann for ann in annotations if ann['image_id'] != current_id]
+
         img_info, ld_anns = self.ld_data_map[current_id]
-        has_pro = False
+
+        # 1. Check if there is data (since it's already clean data, just check if dict is empty)
+        has_valid_data = False
         for person_labels in current_labels_map.values():
-            if any(v[2] != -1 for v in person_labels.values()):
-                has_pro = True
+            if person_labels:  # If the dictionary is not empty
+                has_valid_data = True
                 break
+
         out_img_info = img_info.copy()
-        out_img_info["has_pro"] = has_pro
+        out_img_info["has_pro"] = has_valid_data
         images.append(out_img_info)
+
         new_saved_cache = []
+
         if ld_anns:
             for idx, ann in enumerate(ld_anns):
                 out_ann = ann.copy()
                 if idx in current_labels_map:
                     person_labels = current_labels_map[idx]
-                    out_ann["new_keypoints"] = dict(person_labels)
+                    if person_labels:  # Only save if not empty
+                        out_ann["new_keypoints"] = dict(person_labels)
                 annotations.append(out_ann)
                 new_saved_cache.append(out_ann)
         else:
-            if 0 in current_labels_map:
+            if 0 in current_labels_map and current_labels_map[0]:
                 out_ann = {
                     "image_id": current_id,
                     "id": 9000000 + current_id,
@@ -192,10 +196,13 @@ class DataManager:
                 }
                 annotations.append(out_ann)
                 new_saved_cache.append(out_ann)
+
         data["images"] = images
         data["annotations"] = annotations
+
         with open(self.output_label_path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=4)
+
         self.finished_ids.add(current_id)
         self.saved_anns_map[current_id] = new_saved_cache
         return len(self.finished_ids)
@@ -207,7 +214,7 @@ class ImageVisualizer:
         try:
             img = Image.open(img_path).convert("RGB")
         except Exception as e:
-            print(f"无法打开图片: {img_path}, Error: {e}")
+            print(f"Unable to open image: {img_path}, Error: {e}")
             return None
 
         draw = ImageDraw.Draw(img)
@@ -226,34 +233,32 @@ class ImageVisualizer:
 
         r = 4
         for key_id, val in current_person_labels.items():
+            # Only valid data will enter here
             if not isinstance(val, (list, tuple)) or len(val) < 2: continue
+
+            # [STRICT] If there is still -1 in data, cleaning was not thorough, do not draw
+            if val[0] == -1: continue
+
             kx, ky = val[0], val[1]
-            if kx != -1 and ky != -1:
-                kv = val[2] if len(val) > 2 else -1
-                flex = val[3] if len(val) > 3 else -1
+            kv = val[2] if len(val) > 2 else -1
+            flex = val[3] if len(val) > 3 else -1
+            # Read Skip attribute (Index 4)
+            is_skip = val[4] if len(val) > 4 else False
 
-                # [NEW] 读取 Skip 属性 (Index 4)
-                # 只有上残肢点可能有这个属性
-                is_skip = val[4] if len(val) > 4 else False
+            color = Config.COLORS.get(key_id, 'white')
+            draw.ellipse([kx - r, ky - r, kx + r, ky + r], fill=color, outline='black', width=1)
 
-                color = Config.COLORS.get(key_id, 'white')
+            label_text = str(kv)
+            # 1. Prosthetic display Fix/Free
+            if key_id in Config.PROSTHETIC_IDS:
+                f_str = "Fix" if flex == 0 else "Free" if flex == 1 else "?"
+                if flex != -1: label_text += f"\n{f_str}"
 
-                # 画点
-                draw.ellipse([kx - r, ky - r, kx + r, ky + r], fill=color, outline='black', width=1)
+            # 2. [NEW] If Upper residual point skips the middle joint, show [S] marker
+            if is_skip:
+                label_text += "\n[S]"
 
-                # 生成标签文字
-                label_text = str(kv)
-
-                # 1. 假肢显示 Fix/Free
-                if key_id in Config.PROSTHETIC_IDS:
-                    f_str = "Fix" if flex == 0 else "Free" if flex == 1 else "?"
-                    if flex != -1: label_text += f"\n{f_str}"
-
-                # 2. [NEW] 上残肢点如果Skip了中间关节，显示 [S] 标记
-                if is_skip:
-                    label_text += "\n[S]"  # S for Skip
-
-                draw.text((kx + r + 2, ky - r), label_text, fill=color, stroke_fill="black", stroke_width=1)
+            draw.text((kx + r + 2, ky - r), label_text, fill=color, stroke_fill="black", stroke_width=1)
 
         return ImageTk.PhotoImage(img)
 
@@ -316,7 +321,7 @@ class ProsthesisLabelerApp:
             self.master.destroy()
             return
         if not self.data_manager.load_data():
-            messagebox.showerror("错误", "无法加载数据文件。")
+            messagebox.showerror("Error", "Unable to load data files.")
             self.master.destroy()
             return
         self.current_img_index = self.data_manager.get_next_todo_index()
@@ -326,13 +331,13 @@ class ProsthesisLabelerApp:
         self._load_current_image()
 
     def _init_paths(self):
-        ld_path = filedialog.askopenfilename(title="选择 LDPose annotation (.json)", filetypes=[("JSON", "*.json")],
+        ld_path = filedialog.askopenfilename(title="Select LDPose annotation (.json)", filetypes=[("JSON", "*.json")],
                                              initialdir='./ldpose_final/annotations')
         if not ld_path: return False
-        out_path = filedialog.asksaveasfilename(title="保存 labels.json 位置", initialfile="labels.json",
+        out_path = filedialog.asksaveasfilename(title="Save labels.json location", initialfile="labels.json",
                                                 defaultextension=".json", initialdir='./')
         if not out_path: return False
-        img_dir = filedialog.askdirectory(title="选择图片目录", initialdir='./ldpose_final')
+        img_dir = filedialog.askdirectory(title="Select Image Directory", initialdir='./ldpose_final')
         if not img_dir: return False
         if not Path(out_path).exists():
             with open(out_path, "w", encoding="utf-8") as f: json.dump({"images": [], "annotations": []}, f)
@@ -454,8 +459,6 @@ class ProsthesisLabelerApp:
         tk.Button(attr_frame, text="Free(1)", width=5, command=lambda: self._set_attr_flex(1)).pack(side=tk.LEFT,
                                                                                                     padx=2)
 
-        # === [NEW] Skip Joint Checkbox ===
-        # 默认只有在上残肢点 (1,2,5,6) 选中时才显示
         self.skip_joint_var = tk.BooleanVar(value=False)
         self.chk_skip_joint = tk.Checkbutton(
             attr_frame,
@@ -464,8 +467,6 @@ class ProsthesisLabelerApp:
             command=self._on_skip_toggle,
             fg="red", font=("Arial", 9, "bold")
         )
-        # 初始不 Pack, 动态显示
-
         tk.Button(attr_frame, text="Clear", bg="#ffcccc", command=self._clear_current_point).pack(side=tk.RIGHT, padx=5)
 
         toggle_frame = tk.Frame(tools_panel)
@@ -487,19 +488,19 @@ class ProsthesisLabelerApp:
                                                                                                    fill=tk.X,
                                                                                                    expand=True, padx=20)
 
-    # === [NEW] Skip Toggle Logic ===
     def _on_skip_toggle(self):
-        # 只有上残肢点才允许此操作
+        # Only upper residual points allow this operation
         if self.selected_keypoint_id not in Config.UPPER_RESIDUAL_IDS: return
 
-        val = self.skip_joint_var.get()
+        # Even if key doesn't exist, defaultdict creates it. This is fine as long as we don't save -1.
         if self.selected_ann_index not in self.runtime_labels:
             self.runtime_labels[self.selected_ann_index] = defaultdict(lambda: [-1, -1, -1, -1, False])
 
-        # 数据结构: [x, y, vis, flex, skip_bool]
+        # Ensure data structure completeness
+        # Data structure: [x, y, vis, flex, skip_bool]
         point_data = self.runtime_labels[self.selected_ann_index][self.selected_keypoint_id]
         while len(point_data) < 5: point_data.append(False)
-        point_data[4] = val
+        point_data[4] = self.skip_joint_var.get()
         self._refresh_canvas()
 
     def _toggle_bbox_display(self):
@@ -529,7 +530,7 @@ class ProsthesisLabelerApp:
     def _set_attr_flex(self, val):
         if self.selected_keypoint_id < 0: return
         if self.selected_keypoint_id <= 8:
-            messagebox.showwarning("提示", "人体残肢点不需要设置自由度")
+            messagebox.showwarning("Warning", "Flexibility setting not needed for residual limbs")
             return
         if self.selected_ann_index not in self.runtime_labels:
             self.runtime_labels[self.selected_ann_index] = defaultdict(lambda: [-1, -1, -1, -1])
@@ -541,7 +542,7 @@ class ProsthesisLabelerApp:
     def _load_current_image(self):
         ctx = self.data_manager.get_image_context(self.current_img_index)
         if not ctx:
-            messagebox.showinfo("完成", "没有更多图片或索引越界。")
+            messagebox.showinfo("Done", "No more images or index out of bounds.")
             return
         self.runtime_labels = {}
         self.selected_keypoint_id = -1
@@ -555,7 +556,7 @@ class ProsthesisLabelerApp:
             self.ann_listbox.selection_set(0)
         else:
             self.ann_listbox.insert(tk.END, "No Annotations (New)")
-            if 0 not in self.runtime_labels: self.runtime_labels[0] = defaultdict(lambda: [-1, -1, -1])
+            if 0 not in self.runtime_labels: self.runtime_labels[0] = defaultdict(lambda: [-1, -1, -1, -1, False])
         rel_path = ctx['full_path'].relative_to(self.data_manager.image_dir).as_posix()
         self.info_var.set(f"{ctx['index_str']} : {rel_path}")
         self._update_counter()
@@ -573,12 +574,13 @@ class ProsthesisLabelerApp:
             elif not ld_anns:
                 target_idx = 0
             if target_idx is not None:
-                # 恢复数据，确保长度为 5 [x, y, vis, flex, skip_bool]
+                # When restoring data, only keep valid data
                 recovered_data = defaultdict(lambda: [-1, -1, -1, -1, False])
                 for k, v in s_ann["new_keypoints"].items():
-                    val_list = v.copy()
-                    while len(val_list) < 5:
-                        val_list.append(False if len(val_list) == 4 else -1)
+                    val_list = list(v)
+                    if not val_list or val_list[
+                        0] == -1: continue  # [CLEAN] If garbage data is read, discard it directly
+                    while len(val_list) < 5: val_list.append(False if len(val_list) == 4 else -1)
                     recovered_data[int(k)] = val_list
                 self.runtime_labels[target_idx] = recovered_data
         if self.selected_ann_index not in self.runtime_labels:
@@ -597,21 +599,49 @@ class ProsthesisLabelerApp:
             self.tk_img_ref = tk_img
             self.image_label.config(image=tk_img)
 
+    def _prune_garbage(self):
+        """
+        [NEW] Core cleaning function: Iterate through all data in memory, force delete any Key where x == -1.
+        Ensure _validate_before_save and save always deal with clean data.
+        """
+        for ann_idx in list(self.runtime_labels.keys()):
+            person_labels = self.runtime_labels[ann_idx]
+            # Find all invalid Keys
+            keys_to_delete = [
+                k for k, v in person_labels.items()
+                if isinstance(v, list) and len(v) > 0 and v[0] == -1
+            ]
+            # Execute deletion
+            for k in keys_to_delete:
+                del person_labels[k]
+
     def _validate_before_save(self):
+        """
+        [MODIFIED] Strict validation.
+        1. Clean garbage data first.
+        2. Since it's cleaned, if Key exists, it must be a valid point and must pass validation.
+        """
+        # 1. Clean up first, remove all -1s
+        self._prune_garbage()
+
+        # 2. Strict check
         for ann_idx, kps in self.runtime_labels.items():
             for kp_id, val in kps.items():
-                if not isinstance(val, list) or len(val) < 2: continue
-                x, y = val[0], val[1]
-                if x == -1 or y == -1: continue
+                # The loop here ensures we only iterate through existing valid points
+                # Since we just pruned, no need for 'if x == -1 continue' here
+
                 kp_name = Config.KEYPOINTS.get(kp_id, f"ID {kp_id}")
                 vis = val[2] if len(val) > 2 else -1
+
                 if vis == -1:
-                    messagebox.showerror("校验错误", f"#{ann_idx} {kp_name}: 请设置可见性 (Vis)。")
+                    messagebox.showerror("Validation Error", f"#{ann_idx} {kp_name}: Please set Visibility (Vis).")
                     return False
+
                 if kp_id in Config.PROSTHETIC_IDS:
                     flex = val[3] if len(val) > 3 else -1
                     if flex == -1:
-                        messagebox.showerror("校验错误", f"#{ann_idx} {kp_name}: 是假肢点，请设置 'Flex'。")
+                        messagebox.showerror("Validation Error",
+                                             f"#{ann_idx} {kp_name}: It's a prosthetic point, please set 'Flex'.")
                         return False
         return True
 
@@ -625,7 +655,7 @@ class ProsthesisLabelerApp:
 
     def _update_counter(self, saved_count=None):
         if saved_count is None: saved_count = len(self.data_manager.finished_ids)
-        self.counter_var.set(f"已保存: {saved_count}")
+        self.counter_var.set(f"Saved: {saved_count}")
 
     def _on_ann_list_select(self, event):
         sel = self.ann_listbox.curselection()
@@ -633,16 +663,23 @@ class ProsthesisLabelerApp:
             idx = sel[0]
             if idx != self.selected_ann_index:
                 self.selected_ann_index = idx
-                if idx not in self.runtime_labels: self.runtime_labels[idx] = defaultdict(lambda: [-1, -1, -1])
+                if idx not in self.runtime_labels: self.runtime_labels[idx] = defaultdict(
+                    lambda: [-1, -1, -1, -1, False])
                 self._refresh_canvas()
 
     def _on_canvas_click(self, event):
         if self.selected_keypoint_id < 0:
-            messagebox.showwarning("提示", "请先选择一个关键点按钮。")
+            messagebox.showwarning("Tip", "Please select a keypoint button first.")
             return
         if self.selected_ann_index not in self.runtime_labels:
-            self.runtime_labels[self.selected_ann_index] = defaultdict(lambda: [-1, -1, -1])
+            self.runtime_labels[self.selected_ann_index] = defaultdict(lambda: [-1, -1, -1, -1, False])
+
         current_points = self.runtime_labels[self.selected_ann_index]
+        # Ensure list length
+        if self.selected_keypoint_id not in current_points:
+            current_points[self.selected_keypoint_id] = [-1, -1, -1, -1, False]
+
+        # Update coordinates
         current_points[self.selected_keypoint_id][0] = event.x
         current_points[self.selected_keypoint_id][1] = event.y
         self._refresh_canvas()
@@ -650,10 +687,11 @@ class ProsthesisLabelerApp:
     def _set_tool_keypoint(self, kp_id):
         self.selected_keypoint_id = kp_id
 
-        # [NEW] 只有选中的是上残肢点 (1,2,5,6) 时，才显示 "Skip Knee/Elbow" Checkbox
+        # [NEW] Only show "Skip Knee/Elbow" Checkbox when Upper residual points (1,2,5,6) are selected
         if kp_id in Config.UPPER_RESIDUAL_IDS:
             self.chk_skip_joint.pack(side=tk.LEFT, padx=10)
             is_skip = False
+            # Safe read: if Key does not exist, get returns empty, or defaultdict returns default value, which is fine
             if self.selected_ann_index in self.runtime_labels:
                 data = self.runtime_labels[self.selected_ann_index].get(kp_id, [])
                 if len(data) > 4: is_skip = data[4]
@@ -663,17 +701,23 @@ class ProsthesisLabelerApp:
 
     def _set_tool_vis(self, vis):
         if self.selected_keypoint_id < 0:
-            messagebox.showwarning("提示", "请先选择关键点。")
+            messagebox.showwarning("Tip", "Please select a keypoint.")
             return
         if self.selected_ann_index not in self.runtime_labels:
-            self.runtime_labels[self.selected_ann_index] = defaultdict(lambda: [-1, -1, -1])
+            self.runtime_labels[self.selected_ann_index] = defaultdict(lambda: [-1, -1, -1, -1, False])
+
+        # Setting attributes only makes sense when coordinates exist (point is drawn)
+        # If point isn't drawn, this creates [-1, -1, vis, ...], which is fine as prune_garbage will remove it.
         self.runtime_labels[self.selected_ann_index][self.selected_keypoint_id][2] = vis
         self._refresh_canvas()
 
     def _clear_current_point(self):
+        """
+        [MODIFIED] Clear point: delete Key directly from dictionary
+        """
         if self.selected_ann_index in self.runtime_labels:
             if self.selected_keypoint_id in self.runtime_labels[self.selected_ann_index]:
-                self.runtime_labels[self.selected_ann_index][self.selected_keypoint_id] = [-1, -1, -1]
+                del self.runtime_labels[self.selected_ann_index][self.selected_keypoint_id]
                 self._refresh_canvas()
 
     def _prev_image(self):
@@ -682,7 +726,7 @@ class ProsthesisLabelerApp:
             self.current_img_index -= 1
             self._load_current_image()
         else:
-            messagebox.showinfo("提示", "已经是第一张。")
+            messagebox.showinfo("Tip", "Already the first image.")
 
     def _next_image(self):
         if not self._save_current(): return
@@ -690,7 +734,7 @@ class ProsthesisLabelerApp:
             self.current_img_index += 1
             self._load_current_image()
         else:
-            messagebox.showinfo("提示", "已经是最后一张。")
+            messagebox.showinfo("Tip", "Already the last image.")
 
 
 def main():
