@@ -1,5 +1,4 @@
 import json
-import os
 import tkinter as tk
 from tkinter import messagebox, filedialog
 from collections import defaultdict
@@ -77,28 +76,11 @@ class Config:
     COCO_LEFT_SIDE = {5, 7, 9, 11, 13, 15}
     COCO_RIGHT_SIDE = {6, 8, 10, 12, 14, 16}
 
-    # [NEW] Define connections between residual limbs and prosthetics, and between prosthetic joints
-    # Format: (Start Point ID, End Point ID)
     PROSTHETIC_CONNECTIONS = [
-        # Left Upper Arm chain
-        (1, 9),  # Above Elbow Res -> Pros Elbow
-        (9, 11),  # Pros Elbow -> Pros Wrist
-        (3, 11),  # Below Elbow Res -> Pros Wrist
-
-        # Right Upper Arm chain
-        (2, 10),  # Above Elbow Res -> Pros Elbow
-        (10, 12),  # Pros Elbow -> Pros Wrist
-        (4, 12),  # Below Elbow Res -> Pros Wrist
-
-        # Left Leg chain
-        (5, 13),  # Above Knee Res -> Pros Knee
-        (13, 15),  # Pros Knee -> Pros Ankle
-        (7, 15),  # Below Knee Res -> Pros Ankle
-
-        # Right Leg chain
-        (6, 14),  # Above Knee Res -> Pros Knee
-        (14, 16),  # Pros Knee -> Pros Ankle
-        (8, 16),  # Below Knee Res -> Pros Ankle
+        (1, 9), (9, 11), (3, 11),
+        (2, 10), (10, 12), (4, 12),
+        (5, 13), (13, 15), (7, 15),
+        (6, 14), (14, 16), (8, 16),
     ]
 
 
@@ -223,7 +205,6 @@ class DataManager:
 
 
 class ImageVisualizer:
-    # [MODIFIED] Added show_connections parameter
     def render(self, img_path, ld_anns, selected_ann_index, current_labels_map, show_coco_kps=True,
                show_extra_kps=False, show_bbox=True, show_connections=True):
         try:
@@ -245,11 +226,9 @@ class ImageVisualizer:
 
         current_person_labels = current_labels_map.get(selected_ann_index, {})
 
-        # [NEW] Draw prosthetic connections if enabled
         if show_connections:
             self._draw_prosthetic_connections(draw, current_person_labels)
 
-        # Draw Points (Top Layer)
         r = 4
         for key_id, val in current_person_labels.items():
             if not isinstance(val, (list, tuple)) or len(val) < 2: continue
@@ -275,21 +254,17 @@ class ImageVisualizer:
 
         return ImageTk.PhotoImage(img)
 
-    # [NEW] Function to draw lines between residual and prosthetic points
     def _draw_prosthetic_connections(self, draw, labels_map):
-        # Use a bright, distinct color for connections (e.g., Cyan)
         connection_color = '#00FFFF'
         line_width = 3
 
         for start_id, end_id in Config.PROSTHETIC_CONNECTIONS:
-            # Check if both points exist in the current labels map
             if start_id not in labels_map or end_id not in labels_map:
                 continue
 
             pt1_data = labels_map[start_id]
             pt2_data = labels_map[end_id]
 
-            # STRICT validation: Ensure data exists, is list/tuple, and x coordinate is not -1 (valid point)
             if not isinstance(pt1_data, (list, tuple)) or len(pt1_data) < 2 or pt1_data[0] == -1: continue
             if not isinstance(pt2_data, (list, tuple)) or len(pt2_data) < 2 or pt2_data[0] == -1: continue
 
@@ -354,7 +329,6 @@ class ProsthesisLabelerApp:
         self.show_coco_var = tk.BooleanVar(value=False)
         self.show_extra_var = tk.BooleanVar(value=False)
         self.show_bbox_var = tk.BooleanVar(value=True)
-        # [NEW] State for showing prosthetic connections
         self.show_connection_var = tk.BooleanVar(value=True)
 
         if not self._init_paths():
@@ -371,12 +345,6 @@ class ProsthesisLabelerApp:
         self._load_current_image()
 
     def _init_paths(self):
-        # Keep your original path loading logic or use hardcoded ones for testing
-        # ld_path = "./ldpose_final/annotations/ldpose_val.json"
-        # out_path = "./labels.json"
-        # img_dir = "./ldpose_final/val"
-
-        # Using file dialogs as in your original code:
         ld_path = filedialog.askopenfilename(title="Select LDPose annotation (.json)", filetypes=[("JSON", "*.json")],
                                              initialdir='./ldpose_final/annotations')
         if not ld_path: return False
@@ -516,7 +484,6 @@ class ProsthesisLabelerApp:
         )
         tk.Button(attr_frame, text="Clear", bg="#ffcccc", command=self._clear_current_point).pack(side=tk.RIGHT, padx=5)
 
-        # [MODIFIED] Changed toggle_frame layout to accommodate the new button
         toggle_frame = tk.Frame(tools_panel)
         toggle_frame.pack(fill=tk.X, pady=5)
 
@@ -535,21 +502,45 @@ class ProsthesisLabelerApp:
                                          command=self._toggle_bbox_display)
         self.btn_toggle_bbox.pack(side=tk.LEFT, padx=2, expand=True, fill=tk.X)
 
-        # [NEW] Add Toggle Connection Button
-        # Default state is showing connections (sunken, cyan bg)
         self.btn_toggle_conn = tk.Button(row2, text="隐藏假肢连线", relief="sunken", bg="#E0FFFF",
                                          command=self._toggle_connection_display)
         self.btn_toggle_conn.pack(side=tk.LEFT, padx=2, expand=True, fill=tk.X)
 
         self.default_btn_bg = self.btn_toggle_coco.cget("bg")
 
+        # [NEW] Index Search Bar
+        search_frame = tk.Frame(tools_panel)
+        search_frame.pack(fill=tk.X, pady=10)
+        tk.Label(search_frame, text="跳转 Index:", font=("Arial", 10)).pack(side=tk.LEFT)
+        self.entry_search = tk.Entry(search_frame, width=8, font=("Arial", 10))
+        self.entry_search.pack(side=tk.LEFT, padx=5)
+        self.entry_search.bind("<Return>", self._on_search_index)
+        tk.Button(search_frame, text="Go", command=self._on_search_index, height=1).pack(side=tk.LEFT)
+
         nav_frame = tk.Frame(tools_panel)
-        nav_frame.pack(fill=tk.X, pady=10)
+        nav_frame.pack(fill=tk.X, pady=2)
         tk.Button(nav_frame, text="< Previous", height=2, command=self._prev_image).pack(side=tk.LEFT, fill=tk.X,
                                                                                          expand=True, padx=20)
         tk.Button(nav_frame, text="Next >", height=2, bg="#ddffdd", command=self._next_image).pack(side=tk.LEFT,
                                                                                                    fill=tk.X,
                                                                                                    expand=True, padx=20)
+
+    # [NEW] Search handler
+    def _on_search_index(self, event=None):
+        val = self.entry_search.get().strip()
+        if not val: return
+        try:
+            target_idx = int(val) - 1
+        except ValueError:
+            messagebox.showerror("Error", "请输入有效的数字 (Index)")
+            return
+        total_imgs = len(self.data_manager.all_image_ids)
+        if target_idx < 0 or target_idx >= total_imgs:
+            messagebox.showerror("Error", f"索引超出范围。\n有效范围: 1 - {total_imgs}")
+            return
+        if not self._save_current(): return
+        self.current_img_index = target_idx
+        self._load_current_image()
 
     def _on_skip_toggle(self):
         if self.selected_keypoint_id not in Config.UPPER_RESIDUAL_IDS: return
@@ -568,7 +559,6 @@ class ProsthesisLabelerApp:
                                     bg="#FFCCCB" if new_val else self.default_btn_bg)
         self._refresh_canvas()
 
-    # [NEW] Callback for toggle connection button
     def _toggle_connection_display(self):
         new_val = not self.show_connection_var.get()
         self.show_connection_var.set(new_val)
@@ -650,7 +640,6 @@ class ProsthesisLabelerApp:
         if self.selected_ann_index not in self.runtime_labels:
             self.runtime_labels[self.selected_ann_index] = defaultdict(lambda: [-1, -1, -1, -1, False])
 
-    # [MODIFIED] Pass the show_connections state to render
     def _refresh_canvas(self):
         ctx = self.data_manager.get_image_context(self.current_img_index)
         if not ctx: return
@@ -659,7 +648,7 @@ class ProsthesisLabelerApp:
             show_coco_kps=self.show_coco_var.get(),
             show_extra_kps=self.show_extra_var.get(),
             show_bbox=self.show_bbox_var.get(),
-            show_connections=self.show_connection_var.get()  # Pass the new state
+            show_connections=self.show_connection_var.get()
         )
         if tk_img:
             self.tk_img_ref = tk_img
