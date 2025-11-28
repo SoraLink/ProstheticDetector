@@ -56,9 +56,7 @@ class Config:
     # Prosthetic points set (requires Flexibility setting)
     PROSTHETIC_IDS = {9, 10, 11, 12, 13, 14, 15, 16}
 
-    # [NEW] Upper residual limb points (allow Skip Knee/Elbow attribute setting)
-    # 1,2: Upper arm residual (can skip mechanical elbow to connect wrist directly)
-    # 5,6: Thigh residual (can skip mechanical knee to connect ankle directly - Blade Runner style)
+    # Upper residual limb points (allow Skip Knee/Elbow attribute setting)
     UPPER_RESIDUAL_IDS = {1, 2, 5, 6}
 
     COLORS = {
@@ -78,6 +76,30 @@ class Config:
     ]
     COCO_LEFT_SIDE = {5, 7, 9, 11, 13, 15}
     COCO_RIGHT_SIDE = {6, 8, 10, 12, 14, 16}
+
+    # [NEW] Define connections between residual limbs and prosthetics, and between prosthetic joints
+    # Format: (Start Point ID, End Point ID)
+    PROSTHETIC_CONNECTIONS = [
+        # Left Upper Arm chain
+        (1, 9),  # Above Elbow Res -> Pros Elbow
+        (9, 11),  # Pros Elbow -> Pros Wrist
+        (3, 11),  # Below Elbow Res -> Pros Wrist
+
+        # Right Upper Arm chain
+        (2, 10),  # Above Elbow Res -> Pros Elbow
+        (10, 12),  # Pros Elbow -> Pros Wrist
+        (4, 12),  # Below Elbow Res -> Pros Wrist
+
+        # Left Leg chain
+        (5, 13),  # Above Knee Res -> Pros Knee
+        (13, 15),  # Pros Knee -> Pros Ankle
+        (7, 15),  # Below Knee Res -> Pros Ankle
+
+        # Right Leg chain
+        (6, 14),  # Above Knee Res -> Pros Knee
+        (14, 16),  # Pros Knee -> Pros Ankle
+        (8, 16),  # Below Knee Res -> Pros Ankle
+    ]
 
 
 class DataManager:
@@ -145,13 +167,6 @@ class DataManager:
         }
 
     def save_annotation_result(self, current_id, current_labels_map):
-        """
-        [MODIFIED] Strict save logic:
-        1. Filter out all invalid points where x == -1.
-        2. If a Person has no valid points, do not save new_keypoints.
-        3. Recalculate has_pro.
-        """
-        # Note: The current_labels_map here must be cleaned (containing no -1 data)
         try:
             with open(self.output_label_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
@@ -165,10 +180,9 @@ class DataManager:
 
         img_info, ld_anns = self.ld_data_map[current_id]
 
-        # 1. Check if there is data (since it's already clean data, just check if dict is empty)
         has_valid_data = False
         for person_labels in current_labels_map.values():
-            if person_labels:  # If the dictionary is not empty
+            if person_labels:
                 has_valid_data = True
                 break
 
@@ -183,7 +197,7 @@ class DataManager:
                 out_ann = ann.copy()
                 if idx in current_labels_map:
                     person_labels = current_labels_map[idx]
-                    if person_labels:  # Only save if not empty
+                    if person_labels:
                         out_ann["new_keypoints"] = dict(person_labels)
                 annotations.append(out_ann)
                 new_saved_cache.append(out_ann)
@@ -209,8 +223,9 @@ class DataManager:
 
 
 class ImageVisualizer:
+    # [MODIFIED] Added show_connections parameter
     def render(self, img_path, ld_anns, selected_ann_index, current_labels_map, show_coco_kps=True,
-               show_extra_kps=False, show_bbox=True):
+               show_extra_kps=False, show_bbox=True, show_connections=True):
         try:
             img = Image.open(img_path).convert("RGB")
         except Exception as e:
@@ -228,39 +243,60 @@ class ImageVisualizer:
                 draw.rectangle([x, y, x + w, y + h], outline="red", width=3)
                 draw.text((x, y - 15), f"ID: {target_ann.get('id')}", fill="red")
 
-        # Draw Points (Top Layer)
         current_person_labels = current_labels_map.get(selected_ann_index, {})
 
+        # [NEW] Draw prosthetic connections if enabled
+        if show_connections:
+            self._draw_prosthetic_connections(draw, current_person_labels)
+
+        # Draw Points (Top Layer)
         r = 4
         for key_id, val in current_person_labels.items():
-            # Only valid data will enter here
             if not isinstance(val, (list, tuple)) or len(val) < 2: continue
-
-            # [STRICT] If there is still -1 in data, cleaning was not thorough, do not draw
             if val[0] == -1: continue
 
             kx, ky = val[0], val[1]
             kv = val[2] if len(val) > 2 else -1
             flex = val[3] if len(val) > 3 else -1
-            # Read Skip attribute (Index 4)
             is_skip = val[4] if len(val) > 4 else False
 
             color = Config.COLORS.get(key_id, 'white')
             draw.ellipse([kx - r, ky - r, kx + r, ky + r], fill=color, outline='black', width=1)
 
             label_text = str(kv)
-            # 1. Prosthetic display Fix/Free
             if key_id in Config.PROSTHETIC_IDS:
                 f_str = "Fix" if flex == 0 else "Free" if flex == 1 else "?"
                 if flex != -1: label_text += f"\n{f_str}"
 
-            # 2. [NEW] If Upper residual point skips the middle joint, show [S] marker
             if is_skip:
                 label_text += "\n[S]"
 
             draw.text((kx + r + 2, ky - r), label_text, fill=color, stroke_fill="black", stroke_width=1)
 
         return ImageTk.PhotoImage(img)
+
+    # [NEW] Function to draw lines between residual and prosthetic points
+    def _draw_prosthetic_connections(self, draw, labels_map):
+        # Use a bright, distinct color for connections (e.g., Cyan)
+        connection_color = '#00FFFF'
+        line_width = 3
+
+        for start_id, end_id in Config.PROSTHETIC_CONNECTIONS:
+            # Check if both points exist in the current labels map
+            if start_id not in labels_map or end_id not in labels_map:
+                continue
+
+            pt1_data = labels_map[start_id]
+            pt2_data = labels_map[end_id]
+
+            # STRICT validation: Ensure data exists, is list/tuple, and x coordinate is not -1 (valid point)
+            if not isinstance(pt1_data, (list, tuple)) or len(pt1_data) < 2 or pt1_data[0] == -1: continue
+            if not isinstance(pt2_data, (list, tuple)) or len(pt2_data) < 2 or pt2_data[0] == -1: continue
+
+            x1, y1 = pt1_data[0], pt1_data[1]
+            x2, y2 = pt2_data[0], pt2_data[1]
+
+            draw.line([(x1, y1), (x2, y2)], fill=connection_color, width=line_width)
 
     def _draw_coco_keypoints(self, draw, ann):
         kps = ann.get("keypoints", [])
@@ -313,9 +349,13 @@ class ProsthesisLabelerApp:
         self.selected_ann_index = 0
         self.selected_keypoint_id = -1
         self.runtime_labels = {}
+
+        # View States
         self.show_coco_var = tk.BooleanVar(value=False)
         self.show_extra_var = tk.BooleanVar(value=False)
         self.show_bbox_var = tk.BooleanVar(value=True)
+        # [NEW] State for showing prosthetic connections
+        self.show_connection_var = tk.BooleanVar(value=True)
 
         if not self._init_paths():
             self.master.destroy()
@@ -331,6 +371,12 @@ class ProsthesisLabelerApp:
         self._load_current_image()
 
     def _init_paths(self):
+        # Keep your original path loading logic or use hardcoded ones for testing
+        # ld_path = "./ldpose_final/annotations/ldpose_val.json"
+        # out_path = "./labels.json"
+        # img_dir = "./ldpose_final/val"
+
+        # Using file dialogs as in your original code:
         ld_path = filedialog.askopenfilename(title="Select LDPose annotation (.json)", filetypes=[("JSON", "*.json")],
                                              initialdir='./ldpose_final/annotations')
         if not ld_path: return False
@@ -339,6 +385,7 @@ class ProsthesisLabelerApp:
         if not out_path: return False
         img_dir = filedialog.askdirectory(title="Select Image Directory", initialdir='./ldpose_final')
         if not img_dir: return False
+
         if not Path(out_path).exists():
             with open(out_path, "w", encoding="utf-8") as f: json.dump({"images": [], "annotations": []}, f)
         self.data_manager.set_paths(Path(ld_path), Path(out_path), Path(img_dir))
@@ -469,15 +516,31 @@ class ProsthesisLabelerApp:
         )
         tk.Button(attr_frame, text="Clear", bg="#ffcccc", command=self._clear_current_point).pack(side=tk.RIGHT, padx=5)
 
+        # [MODIFIED] Changed toggle_frame layout to accommodate the new button
         toggle_frame = tk.Frame(tools_panel)
         toggle_frame.pack(fill=tk.X, pady=5)
-        self.btn_toggle_coco = tk.Button(toggle_frame, text="显示原始 COCO", command=self._toggle_coco_display)
-        self.btn_toggle_coco.pack(side=tk.LEFT, padx=5, expand=True, fill=tk.X)
-        self.btn_toggle_extra = tk.Button(toggle_frame, text="显示残肢点", command=self._toggle_extra_display)
-        self.btn_toggle_extra.pack(side=tk.LEFT, padx=5, expand=True, fill=tk.X)
-        self.btn_toggle_bbox = tk.Button(toggle_frame, text="隐藏 BBox", relief="sunken", bg="#FFCCCB",
+
+        # Row 1 of toggles
+        row1 = tk.Frame(toggle_frame)
+        row1.pack(fill=tk.X, expand=True)
+        self.btn_toggle_coco = tk.Button(row1, text="显示原始 COCO", command=self._toggle_coco_display)
+        self.btn_toggle_coco.pack(side=tk.LEFT, padx=2, expand=True, fill=tk.X)
+        self.btn_toggle_extra = tk.Button(row1, text="显示残肢点(旧)", command=self._toggle_extra_display)
+        self.btn_toggle_extra.pack(side=tk.LEFT, padx=2, expand=True, fill=tk.X)
+
+        # Row 2 of toggles
+        row2 = tk.Frame(toggle_frame)
+        row2.pack(fill=tk.X, expand=True, pady=2)
+        self.btn_toggle_bbox = tk.Button(row2, text="隐藏 BBox", relief="sunken", bg="#FFCCCB",
                                          command=self._toggle_bbox_display)
-        self.btn_toggle_bbox.pack(side=tk.LEFT, padx=5, expand=True, fill=tk.X)
+        self.btn_toggle_bbox.pack(side=tk.LEFT, padx=2, expand=True, fill=tk.X)
+
+        # [NEW] Add Toggle Connection Button
+        # Default state is showing connections (sunken, cyan bg)
+        self.btn_toggle_conn = tk.Button(row2, text="隐藏假肢连线", relief="sunken", bg="#E0FFFF",
+                                         command=self._toggle_connection_display)
+        self.btn_toggle_conn.pack(side=tk.LEFT, padx=2, expand=True, fill=tk.X)
+
         self.default_btn_bg = self.btn_toggle_coco.cget("bg")
 
         nav_frame = tk.Frame(tools_panel)
@@ -489,15 +552,9 @@ class ProsthesisLabelerApp:
                                                                                                    expand=True, padx=20)
 
     def _on_skip_toggle(self):
-        # Only upper residual points allow this operation
         if self.selected_keypoint_id not in Config.UPPER_RESIDUAL_IDS: return
-
-        # Even if key doesn't exist, defaultdict creates it. This is fine as long as we don't save -1.
         if self.selected_ann_index not in self.runtime_labels:
             self.runtime_labels[self.selected_ann_index] = defaultdict(lambda: [-1, -1, -1, -1, False])
-
-        # Ensure data structure completeness
-        # Data structure: [x, y, vis, flex, skip_bool]
         point_data = self.runtime_labels[self.selected_ann_index][self.selected_keypoint_id]
         while len(point_data) < 5: point_data.append(False)
         point_data[4] = self.skip_joint_var.get()
@@ -511,10 +568,19 @@ class ProsthesisLabelerApp:
                                     bg="#FFCCCB" if new_val else self.default_btn_bg)
         self._refresh_canvas()
 
+    # [NEW] Callback for toggle connection button
+    def _toggle_connection_display(self):
+        new_val = not self.show_connection_var.get()
+        self.show_connection_var.set(new_val)
+        self.btn_toggle_conn.config(text="隐藏假肢连线" if new_val else "显示假肢连线",
+                                    relief="sunken" if new_val else "raised",
+                                    bg="#E0FFFF" if new_val else self.default_btn_bg)
+        self._refresh_canvas()
+
     def _toggle_extra_display(self):
         new_val = not self.show_extra_var.get()
         self.show_extra_var.set(new_val)
-        self.btn_toggle_extra.config(text="隐藏残肢点" if new_val else "显示残肢点",
+        self.btn_toggle_extra.config(text="隐藏残肢点(旧)" if new_val else "显示残肢点(旧)",
                                      relief="sunken" if new_val else "raised",
                                      bg="#ADD8E6" if new_val else self.default_btn_bg)
         self._refresh_canvas()
@@ -574,18 +640,17 @@ class ProsthesisLabelerApp:
             elif not ld_anns:
                 target_idx = 0
             if target_idx is not None:
-                # When restoring data, only keep valid data
                 recovered_data = defaultdict(lambda: [-1, -1, -1, -1, False])
                 for k, v in s_ann["new_keypoints"].items():
                     val_list = list(v)
-                    if not val_list or val_list[
-                        0] == -1: continue  # [CLEAN] If garbage data is read, discard it directly
+                    if not val_list or val_list[0] == -1: continue
                     while len(val_list) < 5: val_list.append(False if len(val_list) == 4 else -1)
                     recovered_data[int(k)] = val_list
                 self.runtime_labels[target_idx] = recovered_data
         if self.selected_ann_index not in self.runtime_labels:
             self.runtime_labels[self.selected_ann_index] = defaultdict(lambda: [-1, -1, -1, -1, False])
 
+    # [MODIFIED] Pass the show_connections state to render
     def _refresh_canvas(self):
         ctx = self.data_manager.get_image_context(self.current_img_index)
         if not ctx: return
@@ -593,43 +658,27 @@ class ProsthesisLabelerApp:
             ctx['full_path'], ctx['ld_anns'], self.selected_ann_index, self.runtime_labels,
             show_coco_kps=self.show_coco_var.get(),
             show_extra_kps=self.show_extra_var.get(),
-            show_bbox=self.show_bbox_var.get()
+            show_bbox=self.show_bbox_var.get(),
+            show_connections=self.show_connection_var.get()  # Pass the new state
         )
         if tk_img:
             self.tk_img_ref = tk_img
             self.image_label.config(image=tk_img)
 
     def _prune_garbage(self):
-        """
-        [NEW] Core cleaning function: Iterate through all data in memory, force delete any Key where x == -1.
-        Ensure _validate_before_save and save always deal with clean data.
-        """
         for ann_idx in list(self.runtime_labels.keys()):
             person_labels = self.runtime_labels[ann_idx]
-            # Find all invalid Keys
             keys_to_delete = [
                 k for k, v in person_labels.items()
                 if isinstance(v, list) and len(v) > 0 and v[0] == -1
             ]
-            # Execute deletion
             for k in keys_to_delete:
                 del person_labels[k]
 
     def _validate_before_save(self):
-        """
-        [MODIFIED] Strict validation.
-        1. Clean garbage data first.
-        2. Since it's cleaned, if Key exists, it must be a valid point and must pass validation.
-        """
-        # 1. Clean up first, remove all -1s
         self._prune_garbage()
-
-        # 2. Strict check
         for ann_idx, kps in self.runtime_labels.items():
             for kp_id, val in kps.items():
-                # The loop here ensures we only iterate through existing valid points
-                # Since we just pruned, no need for 'if x == -1 continue' here
-
                 kp_name = Config.KEYPOINTS.get(kp_id, f"ID {kp_id}")
                 vis = val[2] if len(val) > 2 else -1
 
@@ -675,23 +724,18 @@ class ProsthesisLabelerApp:
             self.runtime_labels[self.selected_ann_index] = defaultdict(lambda: [-1, -1, -1, -1, False])
 
         current_points = self.runtime_labels[self.selected_ann_index]
-        # Ensure list length
         if self.selected_keypoint_id not in current_points:
             current_points[self.selected_keypoint_id] = [-1, -1, -1, -1, False]
 
-        # Update coordinates
         current_points[self.selected_keypoint_id][0] = event.x
         current_points[self.selected_keypoint_id][1] = event.y
         self._refresh_canvas()
 
     def _set_tool_keypoint(self, kp_id):
         self.selected_keypoint_id = kp_id
-
-        # [NEW] Only show "Skip Knee/Elbow" Checkbox when Upper residual points (1,2,5,6) are selected
         if kp_id in Config.UPPER_RESIDUAL_IDS:
             self.chk_skip_joint.pack(side=tk.LEFT, padx=10)
             is_skip = False
-            # Safe read: if Key does not exist, get returns empty, or defaultdict returns default value, which is fine
             if self.selected_ann_index in self.runtime_labels:
                 data = self.runtime_labels[self.selected_ann_index].get(kp_id, [])
                 if len(data) > 4: is_skip = data[4]
@@ -705,16 +749,10 @@ class ProsthesisLabelerApp:
             return
         if self.selected_ann_index not in self.runtime_labels:
             self.runtime_labels[self.selected_ann_index] = defaultdict(lambda: [-1, -1, -1, -1, False])
-
-        # Setting attributes only makes sense when coordinates exist (point is drawn)
-        # If point isn't drawn, this creates [-1, -1, vis, ...], which is fine as prune_garbage will remove it.
         self.runtime_labels[self.selected_ann_index][self.selected_keypoint_id][2] = vis
         self._refresh_canvas()
 
     def _clear_current_point(self):
-        """
-        [MODIFIED] Clear point: delete Key directly from dictionary
-        """
         if self.selected_ann_index in self.runtime_labels:
             if self.selected_keypoint_id in self.runtime_labels[self.selected_ann_index]:
                 del self.runtime_labels[self.selected_ann_index][self.selected_keypoint_id]
