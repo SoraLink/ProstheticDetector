@@ -195,44 +195,68 @@ class DataManager:
 
 
 class ImageVisualizer:
-    # 修改：增加 scale 参数，默认 1.0
     def render(self, img_path, ld_anns, selected_ann_index, current_labels_map, show_coco_kps=True,
                show_extra_kps=False, show_bbox=True, show_connections=True, scale=1.0):
         try:
-            img = Image.open(img_path).convert("RGB")
+            # 1. 打开原图
+            original_img = Image.open(img_path).convert("RGB")
         except Exception as e:
             print(f"Unable to open image: {img_path}, Error: {e}")
             return None
 
-        # 1. 所有的绘制操作（Line, Ellipse, Text）都基于原图尺寸坐标
+        # 2. 【关键修改】立刻进行缩放，而不是画完再缩放
+        # 这样能保证我们在“屏幕分辨率”上绘图，点的大小不会随缩放变形
+        new_w = int(original_img.width * scale)
+        new_h = int(original_img.height * scale)
+
+        # 使用 LANCZOS 保证底图缩放质量
+        img = original_img.resize((new_w, new_h), Image.Resampling.LANCZOS)
         draw = ImageDraw.Draw(img)
+
+        # 定义一个内部函数，用于将 原图坐标 -> 屏幕坐标
+        def to_screen(v):
+            return v * scale
 
         if ld_anns and 0 <= selected_ann_index < len(ld_anns):
             target_ann = ld_anns[selected_ann_index]
-            if show_coco_kps: self._draw_coco_keypoints(draw, target_ann)
-            if show_extra_kps: self._draw_extra_keypoints(draw, target_ann)
+            if show_coco_kps:
+                self._draw_coco_keypoints(draw, target_ann, to_screen)
+            if show_extra_kps:
+                self._draw_extra_keypoints(draw, target_ann, to_screen)
             if show_bbox and "bbox" in target_ann:
                 x, y, w, h = target_ann["bbox"]
-                draw.rectangle([x, y, x + w, y + h], outline="red", width=3)
-                draw.text((x, y - 15), f"ID: {target_ann.get('id')}", fill="red")
+                # BBox 也要转换坐标
+                sx, sy, sw, sh = to_screen(x), to_screen(y), to_screen(w), to_screen(h)
+                draw.rectangle([sx, sy, sx + sw, sy + sh], outline="red", width=2)  # width固定
+                draw.text((sx, sy - 15), f"ID: {target_ann.get('id')}", fill="red")
 
         current_person_labels = current_labels_map.get(selected_ann_index, {})
 
         if show_connections:
-            self._draw_prosthetic_connections(draw, current_person_labels)
+            self._draw_prosthetic_connections(draw, current_person_labels, to_screen)
 
-        r = 6  # 稍微增大一点半径，防止缩放后太小
+        # 定义画点的半径（屏幕像素），固定大小，不会随缩放变大变小
+        r = 4
+
         for key_id, val in current_person_labels.items():
             if not isinstance(val, (list, tuple)) or len(val) < 2: continue
             if val[0] == -1: continue
 
-            kx, ky = val[0], val[1]  # 这些都是原图坐标
+            # 取出原图坐标
+            raw_x, raw_y = val[0], val[1]
+
+            # 【关键】转换为屏幕坐标进行绘制
+            kx = to_screen(raw_x)
+            ky = to_screen(raw_y)
+
             kv = val[2] if len(val) > 2 else -1
             flex = val[3] if len(val) > 3 else -1
             is_skip = val[4] if len(val) > 4 else False
 
             color = Config.COLORS.get(key_id, 'white')
-            draw.ellipse([kx - r, ky - r, kx + r, ky + r], fill=color, outline='black', width=2)
+
+            # 在屏幕坐标上画固定半径的圆
+            draw.ellipse([kx - r, ky - r, kx + r, ky + r], fill=color, outline='black', width=1)
 
             label_text = str(kv)
             if key_id in Config.PROSTHETIC_IDS:
@@ -242,22 +266,13 @@ class ImageVisualizer:
             if is_skip:
                 label_text += "\n[S]"
 
-            # 字体大小这里没有动态调整，如果图片极大被缩小很多，字可能会看不清
-            # 但保证了坐标是对的
             draw.text((kx + r + 2, ky - r), label_text, fill=color, stroke_fill="black", stroke_width=1)
-
-        # 2. 绘制完成后，根据 scale 进行整体缩放
-        if scale != 1.0:
-            new_w = int(img.width * scale)
-            new_h = int(img.height * scale)
-            # 使用 LANCZOS 保证缩放质量，如果觉得卡顿可以改用 Image.Resampling.BILINEAR
-            img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
 
         return ImageTk.PhotoImage(img)
 
-    def _draw_prosthetic_connections(self, draw, labels_map):
+    def _draw_prosthetic_connections(self, draw, labels_map, to_screen_func):
         connection_color = '#00FFFF'
-        line_width = 3
+        line_width = 2  # 固定线宽
 
         for start_id, end_id in Config.PROSTHETIC_CONNECTIONS:
             if start_id not in labels_map or end_id not in labels_map:
@@ -269,35 +284,45 @@ class ImageVisualizer:
             if not isinstance(pt1_data, (list, tuple)) or len(pt1_data) < 2 or pt1_data[0] == -1: continue
             if not isinstance(pt2_data, (list, tuple)) or len(pt2_data) < 2 or pt2_data[0] == -1: continue
 
-            x1, y1 = pt1_data[0], pt1_data[1]
-            x2, y2 = pt2_data[0], pt2_data[1]
+            # 转换坐标
+            x1, y1 = to_screen_func(pt1_data[0]), to_screen_func(pt1_data[1])
+            x2, y2 = to_screen_func(pt2_data[0]), to_screen_func(pt2_data[1])
 
             draw.line([(x1, y1), (x2, y2)], fill=connection_color, width=line_width)
 
-    def _draw_coco_keypoints(self, draw, ann):
+    def _draw_coco_keypoints(self, draw, ann, to_screen_func):
         kps = ann.get("keypoints", [])
         if not kps: return
 
         def get_kp(index):
             idx = index * 3
-            if idx + 2 < len(kps): return kps[idx], kps[idx + 1], kps[idx + 2]
+            if idx + 2 < len(kps):
+                # 这里返回的是原图坐标
+                return kps[idx], kps[idx + 1], kps[idx + 2]
             return 0, 0, 0
 
         for i_start, i_end in Config.COCO_SKELETON:
-            x1, y1, v1 = get_kp(i_start)
-            x2, y2, v2 = get_kp(i_end)
+            rx1, ry1, v1 = get_kp(i_start)
+            rx2, ry2, v2 = get_kp(i_end)
+
+            # 转换坐标
+            x1, y1 = to_screen_func(rx1), to_screen_func(ry1)
+            x2, y2 = to_screen_func(rx2), to_screen_func(ry2)
+
             if v1 > 0 and v2 > 0: draw.line([(x1, y1), (x2, y2)], fill='black', width=2)
-        r = 3
+
+        r = 3  # COCO 点半径固定
         for i in range(17):
-            x, y, v = get_kp(i)
+            rx, ry, v = get_kp(i)
             if v > 0:
+                x, y = to_screen_func(rx), to_screen_func(ry)
                 draw.ellipse([x - r, y - r, x + r, y + r], fill='black', outline=None)
                 if i in Config.COCO_LEFT_SIDE:
                     draw.text((x + 5, y - 5), "L", fill="black")
                 elif i in Config.COCO_RIGHT_SIDE:
                     draw.text((x + 5, y - 5), "R", fill="black")
 
-    def _draw_extra_keypoints(self, draw, ann):
+    def _draw_extra_keypoints(self, draw, ann, to_screen_func):
         kps = ann.get("keypoints", [])
         if not kps: return
 
@@ -306,10 +331,11 @@ class ImageVisualizer:
             if idx + 2 < len(kps): return kps[idx], kps[idx + 1], kps[idx + 2]
             return 0, 0, 0
 
-        r = 4
+        r = 4  # Extra 点半径固定
         for i in range(17, 25):
-            x, y, v = get_kp(i)
+            rx, ry, v = get_kp(i)
             if v > 0:
+                x, y = to_screen_func(rx), to_screen_func(ry)
                 draw.ellipse([x - r, y - r, x + r, y + r], fill='#00BFFF', outline='white')
                 draw.text((x + 5, y - 5), f"E{i}", fill="#00BFFF")
 
