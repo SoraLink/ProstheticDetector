@@ -8,15 +8,12 @@ from typing import List, Tuple, Dict
 from PIL import Image, ImageTk, ImageDraw
 
 
-# ... (Config 类保持不变，此处省略以节省篇幅) ...
 class Config:
     """
     Config class. Set window size, keypoint name and colors for anaotation display
     """
     WINDOW_WIDTH = 1400
     WINDOW_HEIGHT = 900
-
-    # ... (原 Config 内容保持不变) ...
 
     KEYPOINTS = {
         1: 'Above left elbow residual limb end',
@@ -73,7 +70,6 @@ class Config:
     ]
 
 
-# ... (DataManager 类保持不变，此处省略) ...
 class DataManager:
     def __init__(self):
         self.ld_label_path = None
@@ -204,8 +200,7 @@ class ImageVisualizer:
             print(f"Unable to open image: {img_path}, Error: {e}")
             return None
 
-        # 2. 【关键修改】立刻进行缩放，而不是画完再缩放
-        # 这样能保证我们在“屏幕分辨率”上绘图，点的大小不会随缩放变形
+        # 2. 立刻进行缩放
         new_w = int(original_img.width * scale)
         new_h = int(original_img.height * scale)
 
@@ -370,8 +365,14 @@ class ProsthesisLabelerApp:
             return
         self.current_img_index = self.data_manager.get_next_todo_index()
         self._setup_ui()
+
+        # === 快捷键绑定区 ===
+        # Listbox 选择上下
         self.master.bind("w", lambda event: self._move_list_selection(-1))
         self.master.bind("s", lambda event: self._move_list_selection(1))
+        # [NEW] 图片切换: a (上一个), d (下一个)
+        self.master.bind("a", lambda event: self._prev_image())
+        self.master.bind("d", lambda event: self._next_image())
 
         # 在 UI setup 之后加载图片，因为计算自适应需要 canvas 尺寸
         self.master.after(100, self._load_current_image)
@@ -468,28 +469,15 @@ class ProsthesisLabelerApp:
         self.canvas.unbind_all("<Button-5>")
 
     def _on_mousewheel(self, event):
-        # --- 调试代码：如果你发现还是不行，取消下面这行的注释，看看控制台输出的 State 是多少 ---
-        # print(f"Debug -> Linux: {event.num}, Win/Mac Delta: {event.delta}, State: {event.state}")
-
-        # Linux 上 Alt 通常是 8 (Mod1)，但如果开了 NumLock 会变成 24 (8+16)
-        # Windows 上 Alt 通常是 131072 (0x20000)
-        # Linux 上 Control 通常是 4
-        # Windows 上 Control 通常是 4
-
+        # [MODIFIED] Linux 兼容性修复
         state = event.state
-
-        # 1. 检查 Alt 键 (兼容 Windows 和 Linux，且忽略 NumLock/CapsLock 干扰)
-        # 使用位运算 & 8 来检查 Linux Alt，使用 & 0x20000 检查 Windows Alt
+        # 1. 检查 Alt 键 (位运算同时兼容 Linux Mod1(8) 和 Windows Alt(0x20000))
         alt_pressed = (state & 8) or (state & 0x20000)
-
-        # 2. 检查 Ctrl 键 (作为备用，防止 Ubuntu 拦截 Alt)
+        # 2. 检查 Ctrl 键 (备用)
         ctrl_pressed = (state & 4)
 
-        # 只要按下了 Alt 或 Ctrl 任意一个，就进入缩放模式
         if alt_pressed or ctrl_pressed:
             # === 执行缩放 ===
-            # Linux 使用 Button-4 (上) / Button-5 (下)
-            # Windows/Mac 使用 delta
             if event.num == 4 or event.delta > 0:
                 self._zoom_image(1.1)  # 放大
             elif event.num == 5 or event.delta < 0:
