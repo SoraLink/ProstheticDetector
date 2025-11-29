@@ -468,17 +468,32 @@ class ProsthesisLabelerApp:
         self.canvas.unbind_all("<Button-5>")
 
     def _on_mousewheel(self, event):
-        # 检查是否按下了 Alt 键 (event.state 131072 通常是 Alt，不同系统可能不同)
-        # 更通用的做法是检查位掩码，但在 Tkinter 中简易方法是：
-        is_alt_pressed = (event.state & 0x20000) or (event.state == 131072) or (event.state == 262152)  # 兼容部分 Linux/Win
+        # --- 调试代码：如果你发现还是不行，取消下面这行的注释，看看控制台输出的 State 是多少 ---
+        # print(f"Debug -> Linux: {event.num}, Win/Mac Delta: {event.delta}, State: {event.state}")
 
-        # 如果你的系统 Alt 键没反应，可以尝试把下面的条件改成 True 来测试，或者打印 event.state
-        if is_alt_pressed:
+        # Linux 上 Alt 通常是 8 (Mod1)，但如果开了 NumLock 会变成 24 (8+16)
+        # Windows 上 Alt 通常是 131072 (0x20000)
+        # Linux 上 Control 通常是 4
+        # Windows 上 Control 通常是 4
+
+        state = event.state
+
+        # 1. 检查 Alt 键 (兼容 Windows 和 Linux，且忽略 NumLock/CapsLock 干扰)
+        # 使用位运算 & 8 来检查 Linux Alt，使用 & 0x20000 检查 Windows Alt
+        alt_pressed = (state & 8) or (state & 0x20000)
+
+        # 2. 检查 Ctrl 键 (作为备用，防止 Ubuntu 拦截 Alt)
+        ctrl_pressed = (state & 4)
+
+        # 只要按下了 Alt 或 Ctrl 任意一个，就进入缩放模式
+        if alt_pressed or ctrl_pressed:
             # === 执行缩放 ===
+            # Linux 使用 Button-4 (上) / Button-5 (下)
+            # Windows/Mac 使用 delta
             if event.num == 4 or event.delta > 0:
-                self._zoom_image(1.1)  # 放大 10%
+                self._zoom_image(1.1)  # 放大
             elif event.num == 5 or event.delta < 0:
-                self._zoom_image(0.9)  # 缩小 10%
+                self._zoom_image(0.9)  # 缩小
         else:
             # === 执行滚动 ===
             if event.num == 4:
