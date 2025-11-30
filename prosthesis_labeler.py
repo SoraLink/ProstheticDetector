@@ -1,5 +1,6 @@
 import json
 import tkinter as tk
+import threading  # [NEW] 用于后台上传
 from tkinter import messagebox, filedialog
 from collections import defaultdict
 from pathlib import Path
@@ -7,11 +8,23 @@ from typing import List, Tuple, Dict
 
 from PIL import Image, ImageTk, ImageDraw
 
+# [NEW] 引入 Hugging Face 上传功能
+try:
+    from huggingface_hub import upload_file
+
+    HF_AVAILABLE = True
+except ImportError:
+    HF_AVAILABLE = False
+    print("Warning: huggingface_hub library not installed. Upload feature disabled.")
+
 
 class Config:
     """
     Config class. Set window size, keypoint name and colors for anaotation display
     """
+    # [NEW] 配置你的 Hugging Face 仓库 ID
+    HF_REPO_ID = "Soralink/LDPoseP"  # 这里填你的 User/RepoName
+
     WINDOW_WIDTH = 1400
     WINDOW_HEIGHT = 900
 
@@ -194,21 +207,16 @@ class ImageVisualizer:
     def render(self, img_path, ld_anns, selected_ann_index, current_labels_map, show_coco_kps=True,
                show_extra_kps=False, show_bbox=True, show_connections=True, scale=1.0):
         try:
-            # 1. 打开原图
             original_img = Image.open(img_path).convert("RGB")
         except Exception as e:
             print(f"Unable to open image: {img_path}, Error: {e}")
             return None
 
-        # 2. 立刻进行缩放
         new_w = int(original_img.width * scale)
         new_h = int(original_img.height * scale)
-
-        # 使用 LANCZOS 保证底图缩放质量
         img = original_img.resize((new_w, new_h), Image.Resampling.LANCZOS)
         draw = ImageDraw.Draw(img)
 
-        # 定义一个内部函数，用于将 原图坐标 -> 屏幕坐标
         def to_screen(v):
             return v * scale
 
@@ -220,9 +228,8 @@ class ImageVisualizer:
                 self._draw_extra_keypoints(draw, target_ann, to_screen)
             if show_bbox and "bbox" in target_ann:
                 x, y, w, h = target_ann["bbox"]
-                # BBox 也要转换坐标
                 sx, sy, sw, sh = to_screen(x), to_screen(y), to_screen(w), to_screen(h)
-                draw.rectangle([sx, sy, sx + sw, sy + sh], outline="red", width=2)  # width固定
+                draw.rectangle([sx, sy, sx + sw, sy + sh], outline="red", width=2)
                 draw.text((sx, sy - 15), f"ID: {target_ann.get('id')}", fill="red")
 
         current_person_labels = current_labels_map.get(selected_ann_index, {})
@@ -230,17 +237,12 @@ class ImageVisualizer:
         if show_connections:
             self._draw_prosthetic_connections(draw, current_person_labels, to_screen)
 
-        # 定义画点的半径（屏幕像素），固定大小，不会随缩放变大变小
         r = 4
-
         for key_id, val in current_person_labels.items():
             if not isinstance(val, (list, tuple)) or len(val) < 2: continue
             if val[0] == -1: continue
 
-            # 取出原图坐标
             raw_x, raw_y = val[0], val[1]
-
-            # 【关键】转换为屏幕坐标进行绘制
             kx = to_screen(raw_x)
             ky = to_screen(raw_y)
 
@@ -249,15 +251,12 @@ class ImageVisualizer:
             is_skip = val[4] if len(val) > 4 else False
 
             color = Config.COLORS.get(key_id, 'white')
-
-            # 在屏幕坐标上画固定半径的圆
             draw.ellipse([kx - r, ky - r, kx + r, ky + r], fill=color, outline='black', width=1)
 
             label_text = str(kv)
             if key_id in Config.PROSTHETIC_IDS:
                 f_str = "Fix" if flex == 0 else "Free" if flex == 1 else "?"
                 if flex != -1: label_text += f"\n{f_str}"
-
             if is_skip:
                 label_text += "\n[S]"
 
@@ -267,22 +266,15 @@ class ImageVisualizer:
 
     def _draw_prosthetic_connections(self, draw, labels_map, to_screen_func):
         connection_color = '#00FFFF'
-        line_width = 2  # 固定线宽
-
+        line_width = 2
         for start_id, end_id in Config.PROSTHETIC_CONNECTIONS:
-            if start_id not in labels_map or end_id not in labels_map:
-                continue
-
+            if start_id not in labels_map or end_id not in labels_map: continue
             pt1_data = labels_map[start_id]
             pt2_data = labels_map[end_id]
-
             if not isinstance(pt1_data, (list, tuple)) or len(pt1_data) < 2 or pt1_data[0] == -1: continue
             if not isinstance(pt2_data, (list, tuple)) or len(pt2_data) < 2 or pt2_data[0] == -1: continue
-
-            # 转换坐标
             x1, y1 = to_screen_func(pt1_data[0]), to_screen_func(pt1_data[1])
             x2, y2 = to_screen_func(pt2_data[0]), to_screen_func(pt2_data[1])
-
             draw.line([(x1, y1), (x2, y2)], fill=connection_color, width=line_width)
 
     def _draw_coco_keypoints(self, draw, ann, to_screen_func):
@@ -291,22 +283,16 @@ class ImageVisualizer:
 
         def get_kp(index):
             idx = index * 3
-            if idx + 2 < len(kps):
-                # 这里返回的是原图坐标
-                return kps[idx], kps[idx + 1], kps[idx + 2]
+            if idx + 2 < len(kps): return kps[idx], kps[idx + 1], kps[idx + 2]
             return 0, 0, 0
 
         for i_start, i_end in Config.COCO_SKELETON:
             rx1, ry1, v1 = get_kp(i_start)
             rx2, ry2, v2 = get_kp(i_end)
-
-            # 转换坐标
             x1, y1 = to_screen_func(rx1), to_screen_func(ry1)
             x2, y2 = to_screen_func(rx2), to_screen_func(ry2)
-
             if v1 > 0 and v2 > 0: draw.line([(x1, y1), (x2, y2)], fill='black', width=2)
-
-        r = 3  # COCO 点半径固定
+        r = 3
         for i in range(17):
             rx, ry, v = get_kp(i)
             if v > 0:
@@ -326,7 +312,7 @@ class ImageVisualizer:
             if idx + 2 < len(kps): return kps[idx], kps[idx + 1], kps[idx + 2]
             return 0, 0, 0
 
-        r = 4  # Extra 点半径固定
+        r = 4
         for i in range(17, 25):
             rx, ry, v = get_kp(i)
             if v > 0:
@@ -346,8 +332,6 @@ class ProsthesisLabelerApp:
         self.selected_ann_index = 0
         self.selected_keypoint_id = -1
         self.runtime_labels = {}
-
-        # [NEW] 缩放因子
         self.scale = 1.0
 
         # View States
@@ -367,15 +351,83 @@ class ProsthesisLabelerApp:
         self._setup_ui()
 
         # === 快捷键绑定区 ===
-        # Listbox 选择上下
         self.master.bind("w", lambda event: self._move_list_selection(-1))
         self.master.bind("s", lambda event: self._move_list_selection(1))
-        # [NEW] 图片切换: a (上一个), d (下一个)
         self.master.bind("a", lambda event: self._prev_image())
         self.master.bind("d", lambda event: self._next_image())
 
-        # 在 UI setup 之后加载图片，因为计算自适应需要 canvas 尺寸
+        # [NEW] 绑定窗口关闭事件，防止忘记上传
+        self.master.protocol("WM_DELETE_WINDOW", self._on_close_window)
+
         self.master.after(100, self._load_current_image)
+
+    # [NEW] 实际执行上传任务的函数 (运行在后台线程)
+    def _upload_to_hf(self):
+        if not HF_AVAILABLE:
+            self.master.after(0, lambda: messagebox.showerror("Error", "Hugging Face library not installed."))
+            return
+        if not self.data_manager.output_label_path:
+            return
+
+        try:
+            # 1. 强制刷新UI，显示正在上传
+            self.master.after(0, lambda: self.info_var.set("Syncing to Cloud... (Do not close)"))
+
+            # 2. 执行上传
+            print("Starting upload to Hugging Face...")
+            upload_file(
+                path_or_fileobj=str(self.data_manager.output_label_path),
+                path_in_repo="labels.json",  # 仓库里的文件名
+                repo_id=Config.HF_REPO_ID,
+                repo_type="dataset",
+                commit_message=f"Sync annotations: {self.counter_var.get()}"
+            )
+            print("Upload success.")
+
+            # 3. 回调通知
+            self.master.after(0, lambda: messagebox.showinfo("Success", "Upload to Hugging Face Completed!"))
+            self.master.after(0, lambda: self.info_var.set(f"Sync Complete (Last saved: {self.counter_var.get()})"))
+
+        except Exception as e:
+            print(f"Upload failed: {e}")
+            self.master.after(0, lambda: messagebox.showerror("Error", f"Upload Failed: {e}"))
+            self.master.after(0, lambda: self.info_var.set("Sync Failed"))
+
+    # [NEW] 启动后台线程的包装函数
+    def _start_upload_thread(self):
+        # 先保存当前进度
+        if not self._save_current():
+            return
+
+        # 启动线程
+        t = threading.Thread(target=self._upload_to_hf)
+        t.daemon = True  # 设置为守护线程
+        t.start()
+
+    # [NEW] 窗口关闭时的处理函数
+    def _on_close_window(self):
+        if messagebox.askyesno("Exit", "Do you want to upload data to Hugging Face before exiting?"):
+            self._save_current()
+            if HF_AVAILABLE:
+                try:
+                    self.info_var.set("Uploading... Please wait...")
+                    self.master.update()  # 强制刷新
+
+                    # 退出时使用阻塞式上传，不使用线程，确保传完再关
+                    upload_file(
+                        path_or_fileobj=str(self.data_manager.output_label_path),
+                        path_in_repo="labels.json",
+                        repo_id=Config.HF_REPO_ID,
+                        repo_type="dataset",
+                        commit_message="Final sync on exit"
+                    )
+                    print("Final upload successfully.")
+                except Exception as e:
+                    messagebox.showerror("Error", f"Upload failed: {e}")
+            else:
+                messagebox.showerror("Error", "Library missing, cannot upload.")
+
+        self.master.destroy()
 
     def _init_paths(self):
         ld_path = filedialog.askopenfilename(title="Select LDPose annotation (.json)", filetypes=[("JSON", "*.json")],
@@ -396,10 +448,7 @@ class ProsthesisLabelerApp:
         size = self.ann_listbox.size()
         if size == 0: return
         current_sel = self.ann_listbox.curselection()
-        if not current_sel:
-            target_idx = 0
-        else:
-            target_idx = current_sel[0] + step
+        target_idx = 0 if not current_sel else current_sel[0] + step
         if target_idx < 0: target_idx = 0
         if target_idx >= size: target_idx = size - 1
         if not current_sel or target_idx != current_sel[0]:
@@ -441,25 +490,19 @@ class ProsthesisLabelerApp:
         self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self.canvas.configure(yscrollcommand=v_scroll.set, xscrollcommand=h_scroll.set)
 
-        # 注意：这里我们让 Label 在左上角 'nw' 锚点
         self.image_label = tk.Label(self.canvas, bd=0, highlightthickness=0)
         self.canvas_window = self.canvas.create_window((0, 0), window=self.image_label, anchor="nw")
 
-        # 事件绑定
         self.image_label.bind("<Button-1>", self._on_canvas_click)
         self.image_label.bind('<Enter>', self._bound_to_mousewheel)
         self.canvas.bind('<Enter>', self._bound_to_mousewheel)
         self.image_label.bind('<Leave>', self._unbound_to_mousewheel)
         self.canvas.bind('<Leave>', self._unbound_to_mousewheel)
-
-        # 初始 Scrollregion
         self.image_label.bind("<Configure>", self._on_image_resize)
 
     def _bound_to_mousewheel(self, event):
         self.canvas.focus_set()
-        # Windows / MacOS
         self.canvas.bind_all("<MouseWheel>", self._on_mousewheel)
-        # Linux
         self.canvas.bind_all("<Button-4>", self._on_mousewheel)
         self.canvas.bind_all("<Button-5>", self._on_mousewheel)
 
@@ -469,21 +512,16 @@ class ProsthesisLabelerApp:
         self.canvas.unbind_all("<Button-5>")
 
     def _on_mousewheel(self, event):
-        # [MODIFIED] Linux 兼容性修复
         state = event.state
-        # 1. 检查 Alt 键 (位运算同时兼容 Linux Mod1(8) 和 Windows Alt(0x20000))
         alt_pressed = (state & 8) or (state & 0x20000)
-        # 2. 检查 Ctrl 键 (备用)
         ctrl_pressed = (state & 4)
 
         if alt_pressed or ctrl_pressed:
-            # === 执行缩放 ===
             if event.num == 4 or event.delta > 0:
-                self._zoom_image(1.1)  # 放大
+                self._zoom_image(1.1)
             elif event.num == 5 or event.delta < 0:
-                self._zoom_image(0.9)  # 缩小
+                self._zoom_image(0.9)
         else:
-            # === 执行滚动 ===
             if event.num == 4:
                 self.canvas.yview_scroll(-1, "units")
             elif event.num == 5:
@@ -494,10 +532,8 @@ class ProsthesisLabelerApp:
 
     def _zoom_image(self, factor):
         new_scale = self.scale * factor
-        # 限制缩放范围，例如最小 0.1 倍，最大 5 倍
         if new_scale < 0.1: new_scale = 0.1
         if new_scale > 5.0: new_scale = 5.0
-
         self.scale = new_scale
         self._refresh_canvas()
 
@@ -505,8 +541,6 @@ class ProsthesisLabelerApp:
         self.canvas.configure(scrollregion=self.canvas.bbox("all"))
 
     def _setup_control_buttons(self, parent):
-        # ... (按钮布局代码保持不变，省略以节省篇幅) ...
-        # 此处复制粘贴原有的 _setup_control_buttons 内容即可
         kp_panel = tk.Frame(parent, bd=1, relief=tk.SUNKEN)
         kp_panel.pack(side=tk.LEFT, fill=tk.Y, padx=10, pady=10)
         for i in range(4): kp_panel.columnconfigure(i, weight=1)
@@ -551,7 +585,6 @@ class ProsthesisLabelerApp:
         toggle_frame = tk.Frame(tools_panel)
         toggle_frame.pack(fill=tk.X, pady=5)
 
-        # Row 1 of toggles
         row1 = tk.Frame(toggle_frame)
         row1.pack(fill=tk.X, expand=True)
         self.btn_toggle_coco = tk.Button(row1, text="显示原始 COCO", command=self._toggle_coco_display)
@@ -559,22 +592,18 @@ class ProsthesisLabelerApp:
         self.btn_toggle_extra = tk.Button(row1, text="显示残肢点(旧)", command=self._toggle_extra_display)
         self.btn_toggle_extra.pack(side=tk.LEFT, padx=2, expand=True, fill=tk.X)
 
-        # Row 2 of toggles
         row2 = tk.Frame(toggle_frame)
         row2.pack(fill=tk.X, expand=True, pady=2)
         self.btn_toggle_bbox = tk.Button(row2, text="隐藏 BBox", relief="sunken", bg="#FFCCCB",
                                          command=self._toggle_bbox_display)
         self.btn_toggle_bbox.pack(side=tk.LEFT, padx=2, expand=True, fill=tk.X)
-
         self.btn_toggle_conn = tk.Button(row2, text="隐藏假肢连线", relief="sunken", bg="#E0FFFF",
                                          command=self._toggle_connection_display)
         self.btn_toggle_conn.pack(side=tk.LEFT, padx=2, expand=True, fill=tk.X)
-
         self.default_btn_bg = self.btn_toggle_coco.cget("bg")
 
-        # [NEW] Index Search Bar
         search_frame = tk.Frame(tools_panel)
-        search_frame.pack(fill=tk.X, pady=10)
+        search_frame.pack(fill=tk.X, pady=5)
         tk.Label(search_frame, text="跳转 Index:", font=("Arial", 10)).pack(side=tk.LEFT)
         self.entry_search = tk.Entry(search_frame, width=8, font=("Arial", 10))
         self.entry_search.pack(side=tk.LEFT, padx=5)
@@ -582,14 +611,24 @@ class ProsthesisLabelerApp:
         tk.Button(search_frame, text="Go", command=self._on_search_index, height=1).pack(side=tk.LEFT)
 
         nav_frame = tk.Frame(tools_panel)
-        nav_frame.pack(fill=tk.X, pady=2)
+        nav_frame.pack(fill=tk.X, pady=5)
         tk.Button(nav_frame, text="< Previous", height=2, command=self._prev_image).pack(side=tk.LEFT, fill=tk.X,
                                                                                          expand=True, padx=20)
         tk.Button(nav_frame, text="Next >", height=2, bg="#ddffdd", command=self._next_image).pack(side=tk.LEFT,
                                                                                                    fill=tk.X,
                                                                                                    expand=True, padx=20)
 
-    # [NEW] Search handler
+        # [NEW] Cloud Sync Button
+        sync_frame = tk.Frame(tools_panel)
+        sync_frame.pack(fill=tk.X, pady=10)
+        self.btn_upload = tk.Button(
+            sync_frame,
+            text="☁️ Sync to HuggingFace",
+            bg="#007bff", fg="white", font=("Arial", 10, "bold"),
+            command=self._start_upload_thread
+        )
+        self.btn_upload.pack(fill=tk.X, ipady=5)
+
     def _on_search_index(self, event=None):
         val = self.entry_search.get().strip()
         if not val: return
@@ -681,29 +720,19 @@ class ProsthesisLabelerApp:
         self.info_var.set(f"{ctx['index_str']} : {rel_path}")
         self._update_counter()
 
-        # [NEW] 自适应缩放逻辑
         try:
             with Image.open(ctx['full_path']) as temp_img:
                 img_w, img_h = temp_img.size
-
-            # 获取当前 canvas 的可见尺寸
             canvas_w = self.canvas.winfo_width()
             canvas_h = self.canvas.winfo_height()
-
-            # 如果 canvas 还没显示出来，给个默认值防止除0
             if canvas_w < 50: canvas_w = 800
             if canvas_h < 50: canvas_h = 600
-
             scale_w = canvas_w / img_w
             scale_h = canvas_h / img_h
-
-            # 只有当图片比画布大时才缩小 (scale < 1)，或者你想始终适应屏幕就去掉 min(..., 1.0)
             self.scale = min(scale_w, scale_h, 1.0)
-
         except Exception as e:
             print(f"Error calculating scale: {e}")
             self.scale = 1.0
-
         self._refresh_canvas()
 
     def _reconstruct_runtime_state(self, ctx):
@@ -731,14 +760,13 @@ class ProsthesisLabelerApp:
     def _refresh_canvas(self):
         ctx = self.data_manager.get_image_context(self.current_img_index)
         if not ctx: return
-        # 传递 self.scale 给 visualizer
         tk_img = self.visualizer.render(
             ctx['full_path'], ctx['ld_anns'], self.selected_ann_index, self.runtime_labels,
             show_coco_kps=self.show_coco_var.get(),
             show_extra_kps=self.show_extra_var.get(),
             show_bbox=self.show_bbox_var.get(),
             show_connections=self.show_connection_var.get(),
-            scale=self.scale  # [NEW]
+            scale=self.scale
         )
         if tk_img:
             self.tk_img_ref = tk_img
@@ -760,11 +788,9 @@ class ProsthesisLabelerApp:
             for kp_id, val in kps.items():
                 kp_name = Config.KEYPOINTS.get(kp_id, f"ID {kp_id}")
                 vis = val[2] if len(val) > 2 else -1
-
                 if vis == -1:
                     messagebox.showerror("Validation Error", f"#{ann_idx} {kp_name}: Please set Visibility (Vis).")
                     return False
-
                 if kp_id in Config.PROSTHETIC_IDS:
                     flex = val[3] if len(val) > 3 else -1
                     if flex == -1:
@@ -806,7 +832,6 @@ class ProsthesisLabelerApp:
         if self.selected_keypoint_id not in current_points:
             current_points[self.selected_keypoint_id] = [-1, -1, -1, -1, False]
 
-        # [NEW] 坐标转换：点击的坐标是缩放后的，除以 scale 还原为真实坐标
         real_x = int(event.x / self.scale)
         real_y = int(event.y / self.scale)
 
