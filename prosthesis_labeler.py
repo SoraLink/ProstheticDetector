@@ -1,6 +1,7 @@
 import json
 import tkinter as tk
-import threading  # [NEW] 用于后台上传
+import threading
+import shutil  # [NEW] 用于复制文件
 from tkinter import messagebox, filedialog
 from collections import defaultdict
 from pathlib import Path
@@ -8,14 +9,14 @@ from typing import List, Tuple, Dict
 
 from PIL import Image, ImageTk, ImageDraw
 
-# [NEW] 引入 Hugging Face 上传功能
+# [NEW] 引入 Hugging Face 下载和上传功能
 try:
-    from huggingface_hub import upload_file
+    from huggingface_hub import upload_file, hf_hub_download  # [NEW] 增加 hf_hub_download
 
     HF_AVAILABLE = True
 except ImportError:
     HF_AVAILABLE = False
-    print("Warning: huggingface_hub library not installed. Upload feature disabled.")
+    print("Warning: huggingface_hub library not installed. Cloud features disabled.")
 
 
 class Config:
@@ -340,13 +341,20 @@ class ProsthesisLabelerApp:
         self.show_bbox_var = tk.BooleanVar(value=True)
         self.show_connection_var = tk.BooleanVar(value=True)
 
+        # 1. 先让用户选择路径
         if not self._init_paths():
             self.master.destroy()
             return
+
+        # [NEW] 2. 路径选好后，立刻询问是否从云端下载并覆盖
+        self._sync_from_cloud_on_startup()
+
+        # 3. 无论是否下载，现在加载（可能是新的，也可能是旧的）数据
         if not self.data_manager.load_data():
             messagebox.showerror("Error", "Unable to load data files.")
             self.master.destroy()
             return
+
         self.current_img_index = self.data_manager.get_next_todo_index()
         self._setup_ui()
 
@@ -356,12 +364,47 @@ class ProsthesisLabelerApp:
         self.master.bind("a", lambda event: self._prev_image())
         self.master.bind("d", lambda event: self._next_image())
 
-        # [NEW] 绑定窗口关闭事件，防止忘记上传
         self.master.protocol("WM_DELETE_WINDOW", self._on_close_window)
 
         self.master.after(100, self._load_current_image)
 
-    # [NEW] 实际执行上传任务的函数 (运行在后台线程)
+    # [NEW] 启动时同步逻辑
+    def _sync_from_cloud_on_startup(self):
+        if not HF_AVAILABLE:
+            return
+
+        # 弹窗询问，避免误覆盖
+        msg = f"Do you want to download the latest 'labels.json' from Hugging Face?\n\nRepo: {Config.HF_REPO_ID}\n\nWARNING: This will OVERWRITE your local file:\n{self.data_manager.output_label_path}"
+        if not messagebox.askyesno("Cloud Sync Check", msg):
+            return
+
+        try:
+            # 创建个临时的提示窗，因为下载可能会卡几秒
+            loading_win = tk.Toplevel(self.master)
+            loading_win.title("Downloading...")
+            loading_win.geometry("300x100")
+            tk.Label(loading_win, text="Downloading labels.json from Cloud...\nPlease wait.", pady=20).pack()
+            self.master.update()
+
+            # 1. 下载到 HF 缓存目录
+            print("Downloading from Hugging Face...")
+            cached_file_path = hf_hub_download(
+                repo_id=Config.HF_REPO_ID,
+                filename="labels.json",
+                repo_type="dataset"
+            )
+
+            # 2. 复制并覆盖用户指定的本地路径
+            target_path = self.data_manager.output_label_path
+            shutil.copy(cached_file_path, target_path)
+
+            loading_win.destroy()
+            messagebox.showinfo("Success", "Synced successfully! Loading latest data...")
+
+        except Exception as e:
+            messagebox.showerror("Sync Error", f"Failed to download from Cloud:\n{e}\n\nLoading local file instead.")
+
+    # 实际执行上传任务的函数 (运行在后台线程)
     def _upload_to_hf(self):
         if not HF_AVAILABLE:
             self.master.after(0, lambda: messagebox.showerror("Error", "Hugging Face library not installed."))
@@ -370,21 +413,18 @@ class ProsthesisLabelerApp:
             return
 
         try:
-            # 1. 强制刷新UI，显示正在上传
             self.master.after(0, lambda: self.info_var.set("Syncing to Cloud... (Do not close)"))
 
-            # 2. 执行上传
             print("Starting upload to Hugging Face...")
             upload_file(
                 path_or_fileobj=str(self.data_manager.output_label_path),
-                path_in_repo="labels.json",  # 仓库里的文件名
+                path_in_repo="labels.json",
                 repo_id=Config.HF_REPO_ID,
                 repo_type="dataset",
                 commit_message=f"Sync annotations: {self.counter_var.get()}"
             )
             print("Upload success.")
 
-            # 3. 回调通知
             self.master.after(0, lambda: messagebox.showinfo("Success", "Upload to Hugging Face Completed!"))
             self.master.after(0, lambda: self.info_var.set(f"Sync Complete (Last saved: {self.counter_var.get()})"))
 
@@ -393,27 +433,21 @@ class ProsthesisLabelerApp:
             self.master.after(0, lambda: messagebox.showerror("Error", f"Upload Failed: {e}"))
             self.master.after(0, lambda: self.info_var.set("Sync Failed"))
 
-    # [NEW] 启动后台线程的包装函数
     def _start_upload_thread(self):
-        # 先保存当前进度
         if not self._save_current():
             return
-
-        # 启动线程
         t = threading.Thread(target=self._upload_to_hf)
-        t.daemon = True  # 设置为守护线程
+        t.daemon = True
         t.start()
 
-    # [NEW] 窗口关闭时的处理函数
     def _on_close_window(self):
         if messagebox.askyesno("Exit", "Do you want to upload data to Hugging Face before exiting?"):
             self._save_current()
             if HF_AVAILABLE:
                 try:
                     self.info_var.set("Uploading... Please wait...")
-                    self.master.update()  # 强制刷新
+                    self.master.update()
 
-                    # 退出时使用阻塞式上传，不使用线程，确保传完再关
                     upload_file(
                         path_or_fileobj=str(self.data_manager.output_label_path),
                         path_in_repo="labels.json",
