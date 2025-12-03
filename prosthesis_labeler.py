@@ -7,7 +7,7 @@ from collections import defaultdict
 from pathlib import Path
 from typing import List, Tuple, Dict
 
-from PIL import Image, ImageTk, ImageDraw
+from PIL import Image, ImageTk, ImageDraw, ImageOps
 
 # [NEW] 引入 Hugging Face 下载和上传功能
 try:
@@ -209,6 +209,7 @@ class ImageVisualizer:
                show_extra_kps=False, show_bbox=True, show_connections=True, scale=1.0):
         try:
             original_img = Image.open(img_path).convert("RGB")
+            original_img = ImageOps.exif_transpose(original_img)
         except Exception as e:
             print(f"Unable to open image: {img_path}, Error: {e}")
             return None
