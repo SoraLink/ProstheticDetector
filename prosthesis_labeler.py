@@ -1,7 +1,7 @@
 import json
 import tkinter as tk
 import threading
-import shutil  # [NEW] 用于复制文件
+import shutil
 from tkinter import messagebox, filedialog
 from collections import defaultdict
 from pathlib import Path
@@ -9,9 +9,8 @@ from typing import List, Tuple, Dict
 
 from PIL import Image, ImageTk, ImageDraw, ImageOps
 
-# [NEW] 引入 Hugging Face 下载和上传功能
 try:
-    from huggingface_hub import upload_file, hf_hub_download  # [NEW] 增加 hf_hub_download
+    from huggingface_hub import upload_file, hf_hub_download
 
     HF_AVAILABLE = True
 except ImportError:
@@ -23,8 +22,8 @@ class Config:
     """
     Config class. Set window size, keypoint name and colors for anaotation display
     """
-    # [NEW] 配置你的 Hugging Face 仓库 ID
-    HF_REPO_ID = "Soralink/LDPoseP"  # 这里填你的 User/RepoName
+    # 配置你的 Hugging Face 仓库 ID
+    HF_REPO_ID = "Soralink/LDPoseP"
 
     WINDOW_WIDTH = 1400
     WINDOW_HEIGHT = 900
@@ -95,6 +94,7 @@ class DataManager:
         self.finished_ids = set()
 
     def set_paths(self, ld_path, out_path, img_dir):
+        # out_path 是一个 Path 对象，我们可以通过 self.output_label_path.name 获取文件名
         self.ld_label_path = ld_path
         self.output_label_path = out_path
         self.image_dir = img_dir
@@ -369,13 +369,16 @@ class ProsthesisLabelerApp:
 
         self.master.after(100, self._load_current_image)
 
-    # [NEW] 启动时同步逻辑
+    # [NEW] 启动时同步逻辑 (修改：动态文件名)
     def _sync_from_cloud_on_startup(self):
         if not HF_AVAILABLE:
             return
 
+        # 获取当前选择的文件名，例如 "train.json"
+        target_filename = self.data_manager.output_label_path.name
+
         # 弹窗询问，避免误覆盖
-        msg = f"Do you want to download the latest 'labels.json' from Hugging Face?\n\nRepo: {Config.HF_REPO_ID}\n\nWARNING: This will OVERWRITE your local file:\n{self.data_manager.output_label_path}"
+        msg = f"Do you want to download the latest '{target_filename}' from Hugging Face?\n\nRepo: {Config.HF_REPO_ID}\n\nWARNING: This will OVERWRITE your local file:\n{self.data_manager.output_label_path}"
         if not messagebox.askyesno("Cloud Sync Check", msg):
             return
 
@@ -384,14 +387,14 @@ class ProsthesisLabelerApp:
             loading_win = tk.Toplevel(self.master)
             loading_win.title("Downloading...")
             loading_win.geometry("300x100")
-            tk.Label(loading_win, text="Downloading labels.json from Cloud...\nPlease wait.", pady=20).pack()
+            tk.Label(loading_win, text=f"Downloading {target_filename} from Cloud...\nPlease wait.", pady=20).pack()
             self.master.update()
 
-            # 1. 下载到 HF 缓存目录
-            print("Downloading from Hugging Face...")
+            # 1. 下载到 HF 缓存目录 (注意 filename 必须与 repo 中一致)
+            print(f"Downloading {target_filename} from Hugging Face...")
             cached_file_path = hf_hub_download(
                 repo_id=Config.HF_REPO_ID,
-                filename="labels.json",
+                filename=target_filename,  # [MODIFIED] 使用动态文件名
                 repo_type="dataset"
             )
 
@@ -400,12 +403,13 @@ class ProsthesisLabelerApp:
             shutil.copy(cached_file_path, target_path)
 
             loading_win.destroy()
-            messagebox.showinfo("Success", "Synced successfully! Loading latest data...")
+            messagebox.showinfo("Success", f"Synced {target_filename} successfully! Loading latest data...")
 
         except Exception as e:
-            messagebox.showerror("Sync Error", f"Failed to download from Cloud:\n{e}\n\nLoading local file instead.")
+            messagebox.showerror("Sync Error",
+                                 f"Failed to download from Cloud:\n{e}\n\nMaybe the file '{target_filename}' does not exist in the repo yet?\nLoading local file instead.")
 
-    # 实际执行上传任务的函数 (运行在后台线程)
+    # 实际执行上传任务的函数 (运行在后台线程) (修改：动态文件名)
     def _upload_to_hf(self):
         if not HF_AVAILABLE:
             self.master.after(0, lambda: messagebox.showerror("Error", "Hugging Face library not installed."))
@@ -416,17 +420,21 @@ class ProsthesisLabelerApp:
         try:
             self.master.after(0, lambda: self.info_var.set("Syncing to Cloud... (Do not close)"))
 
-            print("Starting upload to Hugging Face...")
+            # 获取当前文件名
+            target_filename = self.data_manager.output_label_path.name
+
+            print(f"Starting upload of {target_filename} to Hugging Face...")
             upload_file(
                 path_or_fileobj=str(self.data_manager.output_label_path),
-                path_in_repo="labels.json",
+                path_in_repo=target_filename,  # [MODIFIED] 上传为同名文件
                 repo_id=Config.HF_REPO_ID,
                 repo_type="dataset",
-                commit_message=f"Sync annotations: {self.counter_var.get()}"
+                commit_message=f"Sync {target_filename}: {self.counter_var.get()}"
             )
             print("Upload success.")
 
-            self.master.after(0, lambda: messagebox.showinfo("Success", "Upload to Hugging Face Completed!"))
+            self.master.after(0, lambda: messagebox.showinfo("Success",
+                                                             f"Upload of {target_filename} to Hugging Face Completed!"))
             self.master.after(0, lambda: self.info_var.set(f"Sync Complete (Last saved: {self.counter_var.get()})"))
 
         except Exception as e:
@@ -441,6 +449,7 @@ class ProsthesisLabelerApp:
         t.daemon = True
         t.start()
 
+    # (修改：动态文件名)
     def _on_close_window(self):
         if messagebox.askyesno("Exit", "Do you want to upload data to Hugging Face before exiting?"):
             self._save_current()
@@ -449,12 +458,15 @@ class ProsthesisLabelerApp:
                     self.info_var.set("Uploading... Please wait...")
                     self.master.update()
 
+                    # 获取文件名
+                    target_filename = self.data_manager.output_label_path.name
+
                     upload_file(
                         path_or_fileobj=str(self.data_manager.output_label_path),
-                        path_in_repo="labels.json",
+                        path_in_repo=target_filename,  # [MODIFIED]
                         repo_id=Config.HF_REPO_ID,
                         repo_type="dataset",
-                        commit_message="Final sync on exit"
+                        commit_message=f"Final sync of {target_filename} on exit"
                     )
                     print("Final upload successfully.")
                 except Exception as e:
@@ -468,7 +480,9 @@ class ProsthesisLabelerApp:
         ld_path = filedialog.askopenfilename(title="Select LDPose annotation (.json)", filetypes=[("JSON", "*.json")],
                                              initialdir='./ldpose_final/annotations')
         if not ld_path: return False
-        out_path = filedialog.asksaveasfilename(title="Save labels.json location", initialfile="labels.json",
+
+        # 用户在这里输入保存的文件名，比如 train.json, test.json
+        out_path = filedialog.asksaveasfilename(title="Save Label File location", initialfile="labels.json",
                                                 defaultextension=".json", initialdir='./')
         if not out_path: return False
         img_dir = filedialog.askdirectory(title="Select Image Directory", initialdir='./ldpose_final')
@@ -476,6 +490,8 @@ class ProsthesisLabelerApp:
 
         if not Path(out_path).exists():
             with open(out_path, "w", encoding="utf-8") as f: json.dump({"images": [], "annotations": []}, f)
+
+        # 将路径转为 Path 对象传入 DataManager
         self.data_manager.set_paths(Path(ld_path), Path(out_path), Path(img_dir))
         return True
 
