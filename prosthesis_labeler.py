@@ -245,18 +245,13 @@ class DataManager:
                 print(f"Error saving to disk: {e}")
 
 class ImageVisualizer:
-    def render(self, img_path, ld_anns, selected_ann_index, current_labels_map, show_coco_kps=True,
+    def render(self, base_img, ld_anns, selected_ann_index, current_labels_map, show_coco_kps=True,
                show_extra_kps=False, show_bbox=True, show_connections=True, scale=1.0):
-        try:
-            original_img = Image.open(img_path).convert("RGB")
-            original_img = ImageOps.exif_transpose(original_img)
-        except Exception as e:
-            print(f"Unable to open image: {img_path}, Error: {e}")
+        if base_img is None:
             return None
 
-        new_w = int(original_img.width * scale)
-        new_h = int(original_img.height * scale)
-        img = original_img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+            # [关键优化] 直接在内存中复制一份底图，极快
+        img = base_img.copy()
         draw = ImageDraw.Draw(img)
 
         def to_screen(v):
@@ -375,6 +370,9 @@ class ProsthesisLabelerApp:
         self.selected_keypoint_id = -1
         self.runtime_labels = {}
         self.scale = 1.0
+
+        self.raw_image = None
+        self.display_image = None
 
         # View States
         self.show_coco_var = tk.BooleanVar(value=False)
@@ -626,6 +624,7 @@ class ProsthesisLabelerApp:
         if new_scale < 0.1: new_scale = 0.1
         if new_scale > 5.0: new_scale = 5.0
         self.scale = new_scale
+        self._update_display_image_cache()
         self._refresh_canvas()
 
     def _on_image_resize(self, event):
@@ -794,10 +793,13 @@ class ProsthesisLabelerApp:
         if not ctx:
             messagebox.showinfo("Done", "No more images or index out of bounds.")
             return
+
         self.runtime_labels = {}
         self.selected_keypoint_id = -1
         self.selected_ann_index = 0
         self._reconstruct_runtime_state(ctx)
+
+        # 更新列表 UI
         self.ann_listbox.delete(0, tk.END)
         ld_anns = ctx['ld_anns']
         if ld_anns:
@@ -807,13 +809,18 @@ class ProsthesisLabelerApp:
         else:
             self.ann_listbox.insert(tk.END, "No Annotations (New)")
             if 0 not in self.runtime_labels: self.runtime_labels[0] = defaultdict(lambda: [-1, -1, -1, -1, False])
+
         rel_path = ctx['full_path'].relative_to(self.data_manager.image_dir).as_posix()
         self.info_var.set(f"{ctx['index_str']} : {rel_path}")
         self._update_counter()
 
+        # [关键优化] 在这里加载原始大图，只加载一次！
         try:
-            with Image.open(ctx['full_path']) as temp_img:
-                img_w, img_h = temp_img.size
+            self.raw_image = Image.open(ctx['full_path']).convert("RGB")
+            self.raw_image = ImageOps.exif_transpose(self.raw_image)
+
+            # 计算初始缩放比例
+            img_w, img_h = self.raw_image.size
             canvas_w = self.canvas.winfo_width()
             canvas_h = self.canvas.winfo_height()
             if canvas_w < 50: canvas_w = 800
@@ -821,10 +828,23 @@ class ProsthesisLabelerApp:
             scale_w = canvas_w / img_w
             scale_h = canvas_h / img_h
             self.scale = min(scale_w, scale_h, 1.0)
+
+            # 生成初始的 display_image 缓存
+            self._update_display_image_cache()
+
         except Exception as e:
-            print(f"Error calculating scale: {e}")
-            self.scale = 1.0
+            print(f"Error loading image: {e}")
+            self.raw_image = None
+            self.display_image = None
+
         self._refresh_canvas()
+
+    def _update_display_image_cache(self):
+        if self.raw_image is None: return
+        new_w = int(self.raw_image.width * self.scale)
+        new_h = int(self.raw_image.height * self.scale)
+        # 这一步比较耗时，所以只在 切图 或 缩放 时调用
+        self.display_image = self.raw_image.resize((new_w, new_h), Image.Resampling.LANCZOS)
 
     def _reconstruct_runtime_state(self, ctx):
         saved_anns = ctx['saved_anns']
@@ -852,7 +872,8 @@ class ProsthesisLabelerApp:
         ctx = self.data_manager.get_image_context(self.current_img_index)
         if not ctx: return
         tk_img = self.visualizer.render(
-            ctx['full_path'], ctx['ld_anns'], self.selected_ann_index, self.runtime_labels,
+            self.display_image,
+            ctx['ld_anns'], self.selected_ann_index, self.runtime_labels,
             show_coco_kps=self.show_coco_var.get(),
             show_extra_kps=self.show_extra_var.get(),
             show_bbox=self.show_bbox_var.get(),
