@@ -93,15 +93,20 @@ class DataManager:
         self.saved_anns_map = defaultdict(list)
         self.finished_ids = set()
 
+        # [优化] 新增内存缓存和线程锁
+        self.output_cache = {"images": [], "annotations": []}
+        self.write_lock = threading.Lock()
+
     def set_paths(self, ld_path, out_path, img_dir):
-        # out_path 是一个 Path 对象，我们可以通过 self.output_label_path.name 获取文件名
         self.ld_label_path = ld_path
         self.output_label_path = out_path
         self.image_dir = img_dir
 
     def load_data(self):
+        # 1. 加载原始标注 (只读)
         ld_anns, ld_imgs = self._load_json(self.ld_label_path)
         if not ld_imgs: return False
+
         self.ld_data_map = {}
         temp_ld_anns = defaultdict(list)
         for ann in ld_anns:
@@ -111,11 +116,27 @@ class DataManager:
             if img_id in temp_ld_anns:
                 self.ld_data_map[img_id] = (img, temp_ld_anns[img_id])
         self.all_image_ids = sorted(list(self.ld_data_map.keys()))
-        saved_anns_list, saved_imgs_list = self._load_json(self.output_label_path)
+
+        # 2. [优化] 加载输出文件到内存缓存 self.output_cache
+        # 注意：这里读取的是整个文件的结构，不仅仅是列表
+        if self.output_label_path and self.output_label_path.exists():
+            try:
+                with open(self.output_label_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    # 确保结构完整
+                    if not isinstance(data, dict): data = {"images": [], "annotations": []}
+                    self.output_cache = data
+            except Exception:
+                self.output_cache = {"images": [], "annotations": []}
+        else:
+            self.output_cache = {"images": [], "annotations": []}
+
+        # 3. 构建快速查找表
         self.saved_anns_map = defaultdict(list)
-        for ann in saved_anns_list:
+        for ann in self.output_cache.get("annotations", []):
             self.saved_anns_map[ann['image_id']].append(ann)
-        self.finished_ids = {img['id'] for img in (saved_imgs_list or [])}
+
+        self.finished_ids = {img['id'] for img in self.output_cache.get("images", [])}
         return True
 
     def _load_json(self, path) -> Tuple[List, List]:
@@ -148,20 +169,21 @@ class DataManager:
             "index_str": f"{index + 1}/{len(self.all_image_ids)}"
         }
 
-    def save_annotation_result(self, current_id, current_labels_map):
-        try:
-            with open(self.output_label_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-        except:
-            data = {"images": [], "annotations": []}
+    def save_annotation_result(self, current_id, current_labels_map, sync=False):
+        """
+        sync: 如果为 True，则强制同步写入（用于程序关闭时），否则异步写入。
+        """
+        # [优化] 直接操作内存中的 self.output_cache，不再读取文件
+        images = self.output_cache.get("images", [])
+        annotations = self.output_cache.get("annotations", [])
 
-        images = data.get("images", [])
-        annotations = data.get("annotations", [])
+        # 1. 在内存中移除旧的当前图片数据
+        # (这里用列表推导式虽然是 O(N)，但在内存中比 IO 快几个数量级)
         images = [img for img in images if img['id'] != current_id]
         annotations = [ann for ann in annotations if ann['image_id'] != current_id]
 
+        # 2. 准备新数据
         img_info, ld_anns = self.ld_data_map[current_id]
-
         has_valid_data = False
         for person_labels in current_labels_map.values():
             if person_labels:
@@ -173,7 +195,6 @@ class DataManager:
         images.append(out_img_info)
 
         new_saved_cache = []
-
         if ld_anns:
             for idx, ann in enumerate(ld_anns):
                 out_ann = ann.copy()
@@ -193,16 +214,35 @@ class DataManager:
                 annotations.append(out_ann)
                 new_saved_cache.append(out_ann)
 
-        data["images"] = images
-        data["annotations"] = annotations
+        # 3. 更新内存缓存
+        self.output_cache["images"] = images
+        self.output_cache["annotations"] = annotations
 
-        with open(self.output_label_path, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=4)
-
+        # 更新快速查找表
         self.finished_ids.add(current_id)
         self.saved_anns_map[current_id] = new_saved_cache
+
+        # 4. [优化] 启动线程写入硬盘
+        if sync:
+            self._write_to_disk()  # 阻塞式，用于关闭程序时
+        else:
+            # 开启 daemon 线程，后台默默写入
+            t = threading.Thread(target=self._write_to_disk)
+            t.daemon = True
+            t.start()
+
         return len(self.finished_ids)
 
+    def _write_to_disk(self):
+        """实际的写入操作，加锁防止冲突"""
+        with self.write_lock:
+            try:
+                # 为了防止写入一半程序崩溃导致文件损坏，建议先写临时文件再 rename
+                # 但为了代码简单，这里先直接写（因为 json.dump 比较快）
+                with open(self.output_label_path, "w", encoding="utf-8") as f:
+                    json.dump(self.output_cache, f, ensure_ascii=False, indent=None)  # indent=None 可以减小文件体积并加快写入
+            except Exception as e:
+                print(f"Error saving to disk: {e}")
 
 class ImageVisualizer:
     def render(self, img_path, ld_anns, selected_ann_index, current_labels_map, show_coco_kps=True,
@@ -443,7 +483,7 @@ class ProsthesisLabelerApp:
             self.master.after(0, lambda: self.info_var.set("Sync Failed"))
 
     def _start_upload_thread(self):
-        if not self._save_current():
+        if not self._save_current(sync=True):
             return
         t = threading.Thread(target=self._upload_to_hf)
         t.daemon = True
@@ -451,8 +491,8 @@ class ProsthesisLabelerApp:
 
     # (修改：动态文件名)
     def _on_close_window(self):
+        self._save_current(sync=True)
         if messagebox.askyesno("Exit", "Do you want to upload data to Hugging Face before exiting?"):
-            self._save_current()
             if HF_AVAILABLE:
                 try:
                     self.info_var.set("Uploading... Please wait...")
@@ -850,11 +890,12 @@ class ProsthesisLabelerApp:
                         return False
         return True
 
-    def _save_current(self):
+    def _save_current(self, sync=False):  # 增加 sync 参数
         if not self._validate_before_save(): return False
         ctx = self.data_manager.get_image_context(self.current_img_index)
         if not ctx: return True
-        count = self.data_manager.save_annotation_result(ctx['id'], self.runtime_labels)
+        # 传递 sync 给 DataManager
+        count = self.data_manager.save_annotation_result(ctx['id'], self.runtime_labels, sync=sync)
         self._update_counter(saved_count=count)
         return True
 
