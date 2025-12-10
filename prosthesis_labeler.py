@@ -9,13 +9,23 @@ from typing import List, Tuple, Dict
 
 from PIL import Image, ImageTk, ImageDraw, ImageOps
 
+# ==========================================
+#              GLOBAL SETTINGS
+# ==========================================
+# [开关] 设置为 False 将彻底隐藏按钮、禁用启动/退出时的弹窗和上传功能
+ENABLE_CLOUD_SYNC = False
+# ==========================================
+
 try:
     from huggingface_hub import upload_file, hf_hub_download
 
-    HF_AVAILABLE = True
+    # 逻辑：只有当库存在 且 全局开关打开时，才视为云功能可用
+    HF_AVAILABLE = True if ENABLE_CLOUD_SYNC else False
+
 except ImportError:
     HF_AVAILABLE = False
-    print("Warning: huggingface_hub library not installed. Cloud features disabled.")
+    if ENABLE_CLOUD_SYNC:
+        print("Warning: huggingface_hub library not installed. Cloud features disabled.")
 
 
 class Config:
@@ -244,6 +254,7 @@ class DataManager:
             except Exception as e:
                 print(f"Error saving to disk: {e}")
 
+
 class ImageVisualizer:
     def render(self, base_img, ld_anns, selected_ann_index, current_labels_map, show_coco_kps=True,
                show_extra_kps=False, show_bbox=True, show_connections=True, scale=1.0):
@@ -386,7 +397,9 @@ class ProsthesisLabelerApp:
             return
 
         # [NEW] 2. 路径选好后，立刻询问是否从云端下载并覆盖
-        self._sync_from_cloud_on_startup()
+        # 如果 HF_AVAILABLE 为 False (由于未安装或 GLOBAL 变量关闭)，这里不会执行
+        if HF_AVAILABLE:
+            self._sync_from_cloud_on_startup()
 
         # 3. 无论是否下载，现在加载（可能是新的，也可能是旧的）数据
         if not self.data_manager.load_data():
@@ -409,6 +422,7 @@ class ProsthesisLabelerApp:
 
     # [NEW] 启动时同步逻辑 (修改：动态文件名)
     def _sync_from_cloud_on_startup(self):
+        # 再次检查，虽然 __init__ 已经 check 过了，为了代码独立性保留
         if not HF_AVAILABLE:
             return
 
@@ -450,7 +464,7 @@ class ProsthesisLabelerApp:
     # 实际执行上传任务的函数 (运行在后台线程) (修改：动态文件名)
     def _upload_to_hf(self):
         if not HF_AVAILABLE:
-            self.master.after(0, lambda: messagebox.showerror("Error", "Hugging Face library not installed."))
+            self.master.after(0, lambda: messagebox.showerror("Error", "Cloud features disabled."))
             return
         if not self.data_manager.output_label_path:
             return
@@ -490,8 +504,10 @@ class ProsthesisLabelerApp:
     # (修改：动态文件名)
     def _on_close_window(self):
         self._save_current(sync=True)
-        if messagebox.askyesno("Exit", "Do you want to upload data to Hugging Face before exiting?"):
-            if HF_AVAILABLE:
+
+        # 只有在 HF 功能开启时才询问上传
+        if HF_AVAILABLE:
+            if messagebox.askyesno("Exit", "Do you want to upload data to Hugging Face before exiting?"):
                 try:
                     self.info_var.set("Uploading... Please wait...")
                     self.master.update()
@@ -509,8 +525,6 @@ class ProsthesisLabelerApp:
                     print("Final upload successfully.")
                 except Exception as e:
                     messagebox.showerror("Error", f"Upload failed: {e}")
-            else:
-                messagebox.showerror("Error", "Library missing, cannot upload.")
 
         self.master.destroy()
 
@@ -709,15 +723,17 @@ class ProsthesisLabelerApp:
                                                                                                    expand=True, padx=20)
 
         # [NEW] Cloud Sync Button
-        sync_frame = tk.Frame(tools_panel)
-        sync_frame.pack(fill=tk.X, pady=10)
-        self.btn_upload = tk.Button(
-            sync_frame,
-            text="☁️ Sync to HuggingFace",
-            bg="#007bff", fg="white", font=("Arial", 10, "bold"),
-            command=self._start_upload_thread
-        )
-        self.btn_upload.pack(fill=tk.X, ipady=5)
+        # 只有在 HF 功能可用时才显示按钮
+        if HF_AVAILABLE:
+            sync_frame = tk.Frame(tools_panel)
+            sync_frame.pack(fill=tk.X, pady=10)
+            self.btn_upload = tk.Button(
+                sync_frame,
+                text="☁️ Sync to HuggingFace",
+                bg="#007bff", fg="white", font=("Arial", 10, "bold"),
+                command=self._start_upload_thread
+            )
+            self.btn_upload.pack(fill=tk.X, ipady=5)
 
     def _on_search_index(self, event=None):
         val = self.entry_search.get().strip()
