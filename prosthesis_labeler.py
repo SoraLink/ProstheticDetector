@@ -106,6 +106,7 @@ class DataManager:
         # [优化] 新增内存缓存和线程锁
         self.output_cache = {"images": [], "annotations": []}
         self.write_lock = threading.Lock()
+        self.save_thread = None
 
     def set_paths(self, ld_path, out_path, img_dir):
         self.ld_label_path = ld_path
@@ -224,22 +225,31 @@ class DataManager:
                 annotations.append(out_ann)
                 new_saved_cache.append(out_ann)
 
-        # 3. 更新内存缓存
+        # 3. 更新内存缓存 (保持不变)
         self.output_cache["images"] = images
         self.output_cache["annotations"] = annotations
 
-        # 更新快速查找表
+        # 更新快速查找表 (保持不变)
         self.finished_ids.add(current_id)
         self.saved_anns_map[current_id] = new_saved_cache
 
-        # 4. [优化] 启动线程写入硬盘
+        # 4. 【修改这里】线程控制逻辑
         if sync:
-            self._write_to_disk()  # 阻塞式，用于关闭程序时
+            # 如果是同步（比如关闭程序时），必须强制写，且要等待旧线程结束
+            if self.save_thread and self.save_thread.is_alive():
+                self.save_thread.join()
+            self._write_to_disk()
         else:
-            # 开启 daemon 线程，后台默默写入
-            t = threading.Thread(target=self._write_to_disk)
-            t.daemon = True
-            t.start()
+            # 【核心修改】：如果当前已经有一个保存线程在跑，就直接 return，不排队了
+            # 因为内存里的 self.output_cache 已经是最新的了，下次保存自然会带上这次的修改
+            if self.save_thread and self.save_thread.is_alive():
+                # print("后台忙，本次跳过硬盘写入（内存已更新）") # 调试用
+                return len(self.finished_ids)
+
+            # 如果没有线程在跑，才启动一个新的
+            self.save_thread = threading.Thread(target=self._write_to_disk)
+            self.save_thread.daemon = True
+            self.save_thread.start()
 
         return len(self.finished_ids)
 
