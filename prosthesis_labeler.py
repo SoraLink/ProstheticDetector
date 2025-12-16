@@ -2,6 +2,7 @@ import json
 import tkinter as tk
 import threading
 import shutil
+import copy
 from tkinter import messagebox, filedialog
 from collections import defaultdict
 from pathlib import Path
@@ -13,15 +14,13 @@ from PIL import Image, ImageTk, ImageDraw, ImageOps
 #              GLOBAL SETTINGS
 # ==========================================
 # [开关] 设置为 False 将彻底隐藏按钮、禁用启动/退出时的弹窗和上传功能
-ENABLE_CLOUD_SYNC = False
+ENABLE_CLOUD_SYNC = True
 # ==========================================
 
 try:
     from huggingface_hub import upload_file, hf_hub_download
 
-    # 逻辑：只有当库存在 且 全局开关打开时，才视为云功能可用
     HF_AVAILABLE = True if ENABLE_CLOUD_SYNC else False
-
 except ImportError:
     HF_AVAILABLE = False
     if ENABLE_CLOUD_SYNC:
@@ -30,10 +29,9 @@ except ImportError:
 
 class Config:
     """
-    Config class. Set window size, keypoint name and colors for anaotation display
+    Config class.
     """
-    # 配置你的 Hugging Face 仓库 ID
-    HF_REPO_ID = "Soralink/LDPoseP"
+    HF_REPO_ID = "Soralink/LDPoseP"  # 你的仓库ID
 
     WINDOW_WIDTH = 1400
     WINDOW_HEIGHT = 900
@@ -76,6 +74,10 @@ class Config:
         9: '#0000FF', 10: '#B8860B', 11: '#FFA500', 12: '#800080',
         13: '#808000', 14: '#008080', 15: '#DC143C', 16: '#4B0082',
     }
+
+    # R1 参考点的颜色 (灰色)
+    R1_COLOR = '#A0A0A0'
+
     BUTTON_LAYOUT = [
         [1, 2, 9, 10], [3, 4, 11, 12], [5, 6, 13, 14], [7, 8, 15, 16]
     ]
@@ -95,26 +97,30 @@ class Config:
 
 class DataManager:
     def __init__(self):
-        self.ld_label_path = None
-        self.output_label_path = None
+        self.ld_label_path = None  # 原始 COCO/LD 标注
+        self.round1_label_path = None  # [NEW] Round 1 标注 (只读参考 & 初始值来源)
+        self.output_label_path = None  # Round 2 输出
         self.image_dir = None
+
         self.all_image_ids = []
         self.ld_data_map = {}
-        self.saved_anns_map = defaultdict(list)
+        self.r1_anns_map = defaultdict(list)  # [NEW] Round 1 数据缓存
+        self.saved_anns_map = defaultdict(list)  # Round 2 数据缓存
+        self.saved_images_map = {}  # [NEW] Round 2 图片信息缓存 (用于存储 is_discarded)
         self.finished_ids = set()
 
-        # [优化] 新增内存缓存和线程锁
         self.output_cache = {"images": [], "annotations": []}
         self.write_lock = threading.Lock()
         self.save_thread = None
 
-    def set_paths(self, ld_path, out_path, img_dir):
+    def set_paths(self, ld_path, r1_path, out_path, img_dir):
         self.ld_label_path = ld_path
+        self.round1_label_path = r1_path
         self.output_label_path = out_path
         self.image_dir = img_dir
 
     def load_data(self):
-        # 1. 加载原始标注 (只读)
+        # 1. 加载原始标注 (Base Data)
         ld_anns, ld_imgs = self._load_json(self.ld_label_path)
         if not ld_imgs: return False
 
@@ -128,13 +134,17 @@ class DataManager:
                 self.ld_data_map[img_id] = (img, temp_ld_anns[img_id])
         self.all_image_ids = sorted(list(self.ld_data_map.keys()))
 
-        # 2. [优化] 加载输出文件到内存缓存 self.output_cache
-        # 注意：这里读取的是整个文件的结构，不仅仅是列表
+        # 2. [NEW] 加载 Round 1 数据 (只读)
+        r1_anns, _ = self._load_json(self.round1_label_path)
+        self.r1_anns_map = defaultdict(list)
+        for ann in r1_anns:
+            self.r1_anns_map[ann['image_id']].append(ann)
+
+        # 3. 加载 Round 2 输出文件 (可读写)
         if self.output_label_path and self.output_label_path.exists():
             try:
                 with open(self.output_label_path, "r", encoding="utf-8") as f:
                     data = json.load(f)
-                    # 确保结构完整
                     if not isinstance(data, dict): data = {"images": [], "annotations": []}
                     self.output_cache = data
             except Exception:
@@ -142,10 +152,15 @@ class DataManager:
         else:
             self.output_cache = {"images": [], "annotations": []}
 
-        # 3. 构建快速查找表
+        # 4. 构建 Round 2 快速查找表
         self.saved_anns_map = defaultdict(list)
+        self.saved_images_map = {}  # [NEW]
+
         for ann in self.output_cache.get("annotations", []):
             self.saved_anns_map[ann['image_id']].append(ann)
+
+        for img in self.output_cache.get("images", []):
+            self.saved_images_map[img['id']] = img
 
         self.finished_ids = {img['id'] for img in self.output_cache.get("images", [])}
         return True
@@ -170,30 +185,36 @@ class DataManager:
         if index < 0 or index >= len(self.all_image_ids): return None
         current_id = self.all_image_ids[index]
         img_info, ld_anns = self.ld_data_map[current_id]
+
+        # 获取该图对应的 Round 1 数据
+        r1_anns = self.r1_anns_map.get(current_id, [])
+        # 获取该图对应的 Round 2 (已保存) 数据
         saved_anns = self.saved_anns_map.get(current_id, [])
+        # [NEW] 获取图片状态 (是否废弃)
+        saved_img_info = self.saved_images_map.get(current_id, {})
+        is_discarded = saved_img_info.get("is_discarded", False)
+
         return {
             "id": current_id,
             "file_name": img_info['file_name'],
             "full_path": self.image_dir / img_info['file_name'],
-            "ld_anns": ld_anns,
-            "saved_anns": saved_anns,
+            "ld_anns": ld_anns,  # Base COCO
+            "r1_anns": r1_anns,  # Round 1 Data
+            "saved_anns": saved_anns,  # Round 2 Data
+            "is_discarded": is_discarded,  # [NEW]
             "index_str": f"{index + 1}/{len(self.all_image_ids)}"
         }
 
-    def save_annotation_result(self, current_id, current_labels_map, sync=False):
-        """
-        sync: 如果为 True，则强制同步写入（用于程序关闭时），否则异步写入。
-        """
-        # [优化] 直接操作内存中的 self.output_cache，不再读取文件
+    def save_annotation_result(self, current_id, current_labels_map, is_marked_deleted=False, sync=False):
+        """保存到 Round 2 的缓存和文件"""
         images = self.output_cache.get("images", [])
         annotations = self.output_cache.get("annotations", [])
 
-        # 1. 在内存中移除旧的当前图片数据
-        # (这里用列表推导式虽然是 O(N)，但在内存中比 IO 快几个数量级)
+        # 移除旧数据
         images = [img for img in images if img['id'] != current_id]
         annotations = [ann for ann in annotations if ann['image_id'] != current_id]
 
-        # 2. 准备新数据
+        # 准备新数据
         img_info, ld_anns = self.ld_data_map[current_id]
         has_valid_data = False
         for person_labels in current_labels_map.values():
@@ -203,6 +224,7 @@ class DataManager:
 
         out_img_info = img_info.copy()
         out_img_info["has_pro"] = has_valid_data
+        out_img_info["is_discarded"] = is_marked_deleted  # [NEW] 记录废弃状态
         images.append(out_img_info)
 
         new_saved_cache = []
@@ -225,28 +247,21 @@ class DataManager:
                 annotations.append(out_ann)
                 new_saved_cache.append(out_ann)
 
-        # 3. 更新内存缓存 (保持不变)
         self.output_cache["images"] = images
         self.output_cache["annotations"] = annotations
 
-        # 更新快速查找表 (保持不变)
+        # 更新快速查找表
         self.finished_ids.add(current_id)
         self.saved_anns_map[current_id] = new_saved_cache
+        self.saved_images_map[current_id] = out_img_info  # [NEW]
 
-        # 4. 【修改这里】线程控制逻辑
         if sync:
-            # 如果是同步（比如关闭程序时），必须强制写，且要等待旧线程结束
             if self.save_thread and self.save_thread.is_alive():
                 self.save_thread.join()
             self._write_to_disk()
         else:
-            # 【核心修改】：如果当前已经有一个保存线程在跑，就直接 return，不排队了
-            # 因为内存里的 self.output_cache 已经是最新的了，下次保存自然会带上这次的修改
             if self.save_thread and self.save_thread.is_alive():
-                # print("后台忙，本次跳过硬盘写入（内存已更新）") # 调试用
                 return len(self.finished_ids)
-
-            # 如果没有线程在跑，才启动一个新的
             self.save_thread = threading.Thread(target=self._write_to_disk)
             self.save_thread.daemon = True
             self.save_thread.start()
@@ -254,30 +269,39 @@ class DataManager:
         return len(self.finished_ids)
 
     def _write_to_disk(self):
-        """实际的写入操作，加锁防止冲突"""
         with self.write_lock:
             try:
-                # 为了防止写入一半程序崩溃导致文件损坏，建议先写临时文件再 rename
-                # 但为了代码简单，这里先直接写（因为 json.dump 比较快）
                 with open(self.output_label_path, "w", encoding="utf-8") as f:
-                    json.dump(self.output_cache, f, ensure_ascii=False, indent=None)  # indent=None 可以减小文件体积并加快写入
+                    json.dump(self.output_cache, f, ensure_ascii=False, indent=None)
             except Exception as e:
                 print(f"Error saving to disk: {e}")
 
 
 class ImageVisualizer:
-    def render(self, base_img, ld_anns, selected_ann_index, current_labels_map, show_coco_kps=True,
-               show_extra_kps=False, show_bbox=True, show_connections=True, scale=1.0):
-        if base_img is None:
-            return None
+    def render(self, base_img, ld_anns, selected_ann_index, current_labels_map,
+               r1_anns_map,
+               show_coco_kps=True, show_extra_kps=False,
+               show_bbox=True, show_connections=True,
+               show_r1_res=False, show_r1_pro=False,
+               is_discarded=False,  # [NEW]
+               scale=1.0):
 
-            # [关键优化] 直接在内存中复制一份底图，极快
+        if base_img is None: return None
         img = base_img.copy()
         draw = ImageDraw.Draw(img)
 
         def to_screen(v):
             return v * scale
 
+        # [NEW] 如果被标记废弃，画一个巨大的红叉
+        if is_discarded:
+            w, h = img.size
+            draw.line([(0, 0), (w, h)], fill="red", width=5)
+            draw.line([(0, h), (w, 0)], fill="red", width=5)
+            # 可选：左上角再写个字，防止被遮挡
+            draw.text((10, 10), "!!! DISCARDED !!!", fill="red")
+
+        # 1. 绘制 COCO 基础点
         if ld_anns and 0 <= selected_ann_index < len(ld_anns):
             target_ann = ld_anns[selected_ann_index]
             if show_coco_kps:
@@ -290,6 +314,18 @@ class ImageVisualizer:
                 draw.rectangle([sx, sy, sx + sw, sy + sh], outline="red", width=2)
                 draw.text((sx, sy - 15), f"ID: {target_ann.get('id')}", fill="red")
 
+        # 2. 绘制 Round 1 参考点 (只读，灰色)
+        r1_person_data = {}
+        if r1_anns_map:
+            if 0 <= selected_ann_index < len(r1_anns_map):
+                r1_ann = r1_anns_map[selected_ann_index]
+                if "new_keypoints" in r1_ann:
+                    r1_person_data = r1_ann["new_keypoints"]
+
+        if show_r1_res or show_r1_pro:
+            self._draw_static_points(draw, r1_person_data, to_screen, show_r1_res, show_r1_pro)
+
+        # 3. 绘制 Round 2 当前编辑点
         current_person_labels = current_labels_map.get(selected_ann_index, {})
 
         if show_connections:
@@ -321,6 +357,22 @@ class ImageVisualizer:
             draw.text((kx + r + 2, ky - r), label_text, fill=color, stroke_fill="black", stroke_width=1)
 
         return ImageTk.PhotoImage(img)
+
+    def _draw_static_points(self, draw, kps_dict, to_screen_func, show_res, show_pro):
+        r = 3
+        for kid_str, val in kps_dict.items():
+            kid = int(kid_str)
+            is_res = kid in Config.UPPER_RESIDUAL_IDS or (1 <= kid <= 8)
+            is_pro = kid in Config.PROSTHETIC_IDS
+
+            if is_res and not show_res: continue
+            if is_pro and not show_pro: continue
+
+            if not isinstance(val, (list, tuple)) or len(val) < 2: continue
+            if val[0] == -1: continue
+
+            x, y = to_screen_func(val[0]), to_screen_func(val[1])
+            draw.ellipse([x - r, y - r, x + r, y + r], fill=Config.R1_COLOR, outline='white')
 
     def _draw_prosthetic_connections(self, draw, labels_map, to_screen_func):
         connection_color = '#00FFFF'
@@ -382,7 +434,7 @@ class ImageVisualizer:
 class ProsthesisLabelerApp:
     def __init__(self, master):
         self.master = master
-        self.master.title("LD-Prosthesis Labeler")
+        self.master.title("LD-Prosthesis Labeler - Round 2 Mode")
         self.master.geometry(f"{Config.WINDOW_WIDTH}x{Config.WINDOW_HEIGHT}")
         self.data_manager = DataManager()
         self.visualizer = ImageVisualizer()
@@ -401,17 +453,21 @@ class ProsthesisLabelerApp:
         self.show_bbox_var = tk.BooleanVar(value=True)
         self.show_connection_var = tk.BooleanVar(value=True)
 
-        # 1. 先让用户选择路径
+        # [NEW] Round 1 显示开关
+        self.show_r1_res_var = tk.BooleanVar(value=False)
+        self.show_r1_pro_var = tk.BooleanVar(value=False)
+
+        # [NEW] 废弃标记开关
+        self.is_discarded_var = tk.BooleanVar(value=False)
+
+        # 1. 初始化路径 (现在包含 Round 1 文件)
         if not self._init_paths():
             self.master.destroy()
             return
 
-        # [NEW] 2. 路径选好后，立刻询问是否从云端下载并覆盖
-        # 如果 HF_AVAILABLE 为 False (由于未安装或 GLOBAL 变量关闭)，这里不会执行
         if HF_AVAILABLE:
             self._sync_from_cloud_on_startup()
 
-        # 3. 无论是否下载，现在加载（可能是新的，也可能是旧的）数据
         if not self.data_manager.load_data():
             messagebox.showerror("Error", "Unable to load data files.")
             self.master.destroy()
@@ -420,141 +476,103 @@ class ProsthesisLabelerApp:
         self.current_img_index = self.data_manager.get_next_todo_index()
         self._setup_ui()
 
-        # === 快捷键绑定区 ===
+        # Shortcuts
         self.master.bind("w", lambda event: self._move_list_selection(-1))
         self.master.bind("s", lambda event: self._move_list_selection(1))
         self.master.bind("a", lambda event: self._prev_image())
         self.master.bind("d", lambda event: self._next_image())
-
         self.master.protocol("WM_DELETE_WINDOW", self._on_close_window)
-
         self.master.after(100, self._load_current_image)
 
-    # [NEW] 启动时同步逻辑 (修改：动态文件名)
     def _sync_from_cloud_on_startup(self):
-        # 再次检查，虽然 __init__ 已经 check 过了，为了代码独立性保留
-        if not HF_AVAILABLE:
-            return
-
-        # 获取当前选择的文件名，例如 "train.json"
+        if not HF_AVAILABLE: return
         target_filename = self.data_manager.output_label_path.name
-
-        # 弹窗询问，避免误覆盖
-        msg = f"Do you want to download the latest '{target_filename}' from Hugging Face?\n\nRepo: {Config.HF_REPO_ID}\n\nWARNING: This will OVERWRITE your local file:\n{self.data_manager.output_label_path}"
-        if not messagebox.askyesno("Cloud Sync Check", msg):
-            return
-
+        msg = f"Download latest '{target_filename}' from Cloud?\n(Repo: {Config.HF_REPO_ID})\nWARNING: Overwrites local {target_filename}"
+        if not messagebox.askyesno("Cloud Sync Check", msg): return
         try:
-            # 创建个临时的提示窗，因为下载可能会卡几秒
             loading_win = tk.Toplevel(self.master)
             loading_win.title("Downloading...")
-            loading_win.geometry("300x100")
-            tk.Label(loading_win, text=f"Downloading {target_filename} from Cloud...\nPlease wait.", pady=20).pack()
+            tk.Label(loading_win, text=f"Downloading {target_filename}...", pady=20).pack()
             self.master.update()
-
-            # 1. 下载到 HF 缓存目录 (注意 filename 必须与 repo 中一致)
-            print(f"Downloading {target_filename} from Hugging Face...")
-            cached_file_path = hf_hub_download(
-                repo_id=Config.HF_REPO_ID,
-                filename=target_filename,  # [MODIFIED] 使用动态文件名
-                repo_type="dataset"
-            )
-
-            # 2. 复制并覆盖用户指定的本地路径
-            target_path = self.data_manager.output_label_path
-            shutil.copy(cached_file_path, target_path)
-
+            cached_file_path = hf_hub_download(repo_id=Config.HF_REPO_ID, filename=target_filename, repo_type="dataset")
+            shutil.copy(cached_file_path, self.data_manager.output_label_path)
             loading_win.destroy()
-            messagebox.showinfo("Success", f"Synced {target_filename} successfully! Loading latest data...")
-
+            messagebox.showinfo("Success", f"Synced {target_filename} successfully!")
         except Exception as e:
-            messagebox.showerror("Sync Error",
-                                 f"Failed to download from Cloud:\n{e}\n\nMaybe the file '{target_filename}' does not exist in the repo yet?\nLoading local file instead.")
+            messagebox.showerror("Sync Error", f"Failed to download: {e}")
 
-    # 实际执行上传任务的函数 (运行在后台线程) (修改：动态文件名)
     def _upload_to_hf(self):
-        if not HF_AVAILABLE:
-            self.master.after(0, lambda: messagebox.showerror("Error", "Cloud features disabled."))
-            return
-        if not self.data_manager.output_label_path:
-            return
-
+        if not HF_AVAILABLE: return
+        if not self.data_manager.output_label_path: return
         try:
-            self.master.after(0, lambda: self.info_var.set("Syncing to Cloud... (Do not close)"))
-
-            # 获取当前文件名
+            self.master.after(0, lambda: self.info_var.set("Syncing to Cloud..."))
             target_filename = self.data_manager.output_label_path.name
-
-            print(f"Starting upload of {target_filename} to Hugging Face...")
+            print(f"Uploading {target_filename}...")
             upload_file(
                 path_or_fileobj=str(self.data_manager.output_label_path),
-                path_in_repo=target_filename,  # [MODIFIED] 上传为同名文件
+                path_in_repo=target_filename,
                 repo_id=Config.HF_REPO_ID,
                 repo_type="dataset",
-                commit_message=f"Sync {target_filename}: {self.counter_var.get()}"
+                commit_message=f"R2 Sync {target_filename}: {self.counter_var.get()}"
             )
-            print("Upload success.")
-
-            self.master.after(0, lambda: messagebox.showinfo("Success",
-                                                             f"Upload of {target_filename} to Hugging Face Completed!"))
+            self.master.after(0, lambda: messagebox.showinfo("Success", f"Upload {target_filename} Completed!"))
             self.master.after(0, lambda: self.info_var.set(f"Sync Complete (Last saved: {self.counter_var.get()})"))
-
         except Exception as e:
-            print(f"Upload failed: {e}")
             self.master.after(0, lambda: messagebox.showerror("Error", f"Upload Failed: {e}"))
             self.master.after(0, lambda: self.info_var.set("Sync Failed"))
 
     def _start_upload_thread(self):
-        if not self._save_current(sync=True):
-            return
+        if not self._save_current(sync=True): return
         t = threading.Thread(target=self._upload_to_hf)
         t.daemon = True
         t.start()
 
-    # (修改：动态文件名)
     def _on_close_window(self):
         self._save_current(sync=True)
-
-        # 只有在 HF 功能开启时才询问上传
         if HF_AVAILABLE:
-            if messagebox.askyesno("Exit", "Do you want to upload data to Hugging Face before exiting?"):
+            if messagebox.askyesno("Exit", "Upload to Hugging Face before exiting?"):
                 try:
-                    self.info_var.set("Uploading... Please wait...")
+                    self.info_var.set("Uploading...")
                     self.master.update()
-
-                    # 获取文件名
-                    target_filename = self.data_manager.output_label_path.name
-
                     upload_file(
                         path_or_fileobj=str(self.data_manager.output_label_path),
-                        path_in_repo=target_filename,  # [MODIFIED]
+                        path_in_repo=self.data_manager.output_label_path.name,
                         repo_id=Config.HF_REPO_ID,
                         repo_type="dataset",
-                        commit_message=f"Final sync of {target_filename} on exit"
+                        commit_message="Final sync on exit"
                     )
-                    print("Final upload successfully.")
                 except Exception as e:
                     messagebox.showerror("Error", f"Upload failed: {e}")
-
         self.master.destroy()
 
     def _init_paths(self):
-        ld_path = filedialog.askopenfilename(title="Select LDPose annotation (.json)", filetypes=[("JSON", "*.json")],
-                                             initialdir='./ldpose_final/annotations')
+        # 1. Base JSON
+        ld_path = filedialog.askopenfilename(title="1. Select Base LDPose Annotation (.json)",
+                                             filetypes=[("JSON", "*.json")], initialdir='./ldpose_final/annotations')
         if not ld_path: return False
 
-        # 用户在这里输入保存的文件名，比如 train.json, test.json
-        out_path = filedialog.asksaveasfilename(title="Save Label File location", initialfile="labels.json",
+        # 2. [NEW] Round 1 JSON
+        r1_path = filedialog.askopenfilename(title="2. Select ROUND 1 Result (.json)",
+                                             filetypes=[("JSON", "*.json")], initialdir='./')
+        if not r1_path:
+            if not messagebox.askyesno("Warning", "No Round 1 file selected. Start without Round 1 data copy?"):
+                return False
+            # 允许为空，但功能受限
+            r1_path = None
+
+        # 3. Output JSON
+        out_path = filedialog.asksaveasfilename(title="3. Save ROUND 2 Label File", initialfile="labels_round2.json",
                                                 defaultextension=".json", initialdir='./')
         if not out_path: return False
-        img_dir = filedialog.askdirectory(title="Select Image Directory", initialdir='./ldpose_final')
+
+        # 4. Images
+        img_dir = filedialog.askdirectory(title="4. Select Image Directory", initialdir='./ldpose_final')
         if not img_dir: return False
 
         if not Path(out_path).exists():
             with open(out_path, "w", encoding="utf-8") as f: json.dump({"images": [], "annotations": []}, f)
 
-        # 将路径转为 Path 对象传入 DataManager
-        self.data_manager.set_paths(Path(ld_path), Path(out_path), Path(img_dir))
+        self.data_manager.set_paths(Path(ld_path), Path(r1_path) if r1_path else None, Path(out_path), Path(img_dir))
         return True
 
     def _move_list_selection(self, step):
@@ -628,7 +646,6 @@ class ProsthesisLabelerApp:
         state = event.state
         alt_pressed = (state & 8) or (state & 0x20000)
         ctrl_pressed = (state & 4)
-
         if alt_pressed or ctrl_pressed:
             if event.num == 4 or event.delta > 0:
                 self._zoom_image(1.1)
@@ -676,6 +693,13 @@ class ProsthesisLabelerApp:
         tk.Label(info_frame, textvariable=self.counter_var, font=("Arial", 11, "bold"), fg="blue").pack(side=tk.RIGHT)
         tk.Frame(tools_panel, height=2, bd=1, relief=tk.GROOVE).pack(fill=tk.X, pady=5)
 
+        # [NEW] 废弃标记按钮
+        status_frame = tk.Frame(tools_panel)
+        status_frame.pack(fill=tk.X, pady=2)
+        self.btn_discard = tk.Button(status_frame, text="标记废弃 (Mark as Bad)", command=self._toggle_discard,
+                                     bg="#fff0f0")
+        self.btn_discard.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
         attr_frame = tk.Frame(tools_panel)
         attr_frame.pack(fill=tk.X, pady=5)
         tk.Label(attr_frame, text="Vis:").pack(side=tk.LEFT)
@@ -688,24 +712,25 @@ class ProsthesisLabelerApp:
 
         self.skip_joint_var = tk.BooleanVar(value=False)
         self.chk_skip_joint = tk.Checkbutton(
-            attr_frame,
-            text="Skip Knee/Elbow",
-            variable=self.skip_joint_var,
-            command=self._on_skip_toggle,
-            fg="red", font=("Arial", 9, "bold")
+            attr_frame, text="Skip Knee/Elbow", variable=self.skip_joint_var,
+            command=self._on_skip_toggle, fg="red", font=("Arial", 9, "bold")
         )
         tk.Button(attr_frame, text="Clear", bg="#ffcccc", command=self._clear_current_point).pack(side=tk.RIGHT, padx=5)
 
+        # Toggle Frame
         toggle_frame = tk.Frame(tools_panel)
         toggle_frame.pack(fill=tk.X, pady=5)
 
+        # Row 1 (Original)
         row1 = tk.Frame(toggle_frame)
         row1.pack(fill=tk.X, expand=True)
         self.btn_toggle_coco = tk.Button(row1, text="显示原始 COCO", command=self._toggle_coco_display)
         self.btn_toggle_coco.pack(side=tk.LEFT, padx=2, expand=True, fill=tk.X)
-        self.btn_toggle_extra = tk.Button(row1, text="显示残肢点(旧)", command=self._toggle_extra_display)
-        self.btn_toggle_extra.pack(side=tk.LEFT, padx=2, expand=True, fill=tk.X)
+        self.btn_toggle_extra = tk.Button(row1, text="显示 R2 残肢/假肢 (当前)", state=tk.DISABLED, relief="sunken",
+                                          bg="#ddffdd")
+        self.btn_toggle_extra.pack(side=tk.LEFT, padx=2, expand=True, fill=tk.X)  # 占位或提示
 
+        # Row 2 (BBox / Conn)
         row2 = tk.Frame(toggle_frame)
         row2.pack(fill=tk.X, expand=True, pady=2)
         self.btn_toggle_bbox = tk.Button(row2, text="隐藏 BBox", relief="sunken", bg="#FFCCCB",
@@ -714,6 +739,15 @@ class ProsthesisLabelerApp:
         self.btn_toggle_conn = tk.Button(row2, text="隐藏假肢连线", relief="sunken", bg="#E0FFFF",
                                          command=self._toggle_connection_display)
         self.btn_toggle_conn.pack(side=tk.LEFT, padx=2, expand=True, fill=tk.X)
+
+        # [NEW] Row 3 (Round 1 Toggles)
+        row3 = tk.Frame(toggle_frame)
+        row3.pack(fill=tk.X, expand=True, pady=2)
+        self.btn_r1_res = tk.Button(row3, text="显示 R1 残肢 (旧)", command=lambda: self._toggle_r1_display('res'))
+        self.btn_r1_res.pack(side=tk.LEFT, padx=2, expand=True, fill=tk.X)
+        self.btn_r1_pro = tk.Button(row3, text="显示 R1 假肢 (旧)", command=lambda: self._toggle_r1_display('pro'))
+        self.btn_r1_pro.pack(side=tk.LEFT, padx=2, expand=True, fill=tk.X)
+
         self.default_btn_bg = self.btn_toggle_coco.cget("bg")
 
         search_frame = tk.Frame(tools_panel)
@@ -732,18 +766,27 @@ class ProsthesisLabelerApp:
                                                                                                    fill=tk.X,
                                                                                                    expand=True, padx=20)
 
-        # [NEW] Cloud Sync Button
-        # 只有在 HF 功能可用时才显示按钮
         if HF_AVAILABLE:
             sync_frame = tk.Frame(tools_panel)
             sync_frame.pack(fill=tk.X, pady=10)
             self.btn_upload = tk.Button(
-                sync_frame,
-                text="☁️ Sync to HuggingFace",
+                sync_frame, text="☁️ Sync Round 2 to HuggingFace",
                 bg="#007bff", fg="white", font=("Arial", 10, "bold"),
                 command=self._start_upload_thread
             )
             self.btn_upload.pack(fill=tk.X, ipady=5)
+
+    def _toggle_discard(self):
+        new_val = not self.is_discarded_var.get()
+        self.is_discarded_var.set(new_val)
+        self._update_discard_btn_visual()
+        self._refresh_canvas()
+
+    def _update_discard_btn_visual(self):
+        if self.is_discarded_var.get():
+            self.btn_discard.config(text="[已废弃] 恢复正常", bg="red", fg="white", relief="sunken")
+        else:
+            self.btn_discard.config(text="标记废弃 (Mark as Bad)", bg="#fff0f0", fg="black", relief="raised")
 
     def _on_search_index(self, event=None):
         val = self.entry_search.get().strip()
@@ -751,11 +794,10 @@ class ProsthesisLabelerApp:
         try:
             target_idx = int(val) - 1
         except ValueError:
-            messagebox.showerror("Error", "请输入有效的数字 (Index)")
+            messagebox.showerror("Error", "请输入有效的数字")
             return
-        total_imgs = len(self.data_manager.all_image_ids)
-        if target_idx < 0 or target_idx >= total_imgs:
-            messagebox.showerror("Error", f"索引超出范围。\n有效范围: 1 - {total_imgs}")
+        if target_idx < 0 or target_idx >= len(self.data_manager.all_image_ids):
+            messagebox.showerror("Error", f"索引超出范围。")
             return
         if not self._save_current(): return
         self.current_img_index = target_idx
@@ -786,20 +828,26 @@ class ProsthesisLabelerApp:
                                     bg="#E0FFFF" if new_val else self.default_btn_bg)
         self._refresh_canvas()
 
-    def _toggle_extra_display(self):
-        new_val = not self.show_extra_var.get()
-        self.show_extra_var.set(new_val)
-        self.btn_toggle_extra.config(text="隐藏残肢点(旧)" if new_val else "显示残肢点(旧)",
-                                     relief="sunken" if new_val else "raised",
-                                     bg="#ADD8E6" if new_val else self.default_btn_bg)
-        self._refresh_canvas()
-
     def _toggle_coco_display(self):
         new_val = not self.show_coco_var.get()
         self.show_coco_var.set(new_val)
         self.btn_toggle_coco.config(text="隐藏 COCO" if new_val else "显示 COCO",
                                     relief="sunken" if new_val else "raised",
                                     bg="#ddd" if new_val else self.default_btn_bg)
+        self._refresh_canvas()
+
+    # [NEW] Round 1 显示切换
+    def _toggle_r1_display(self, mode):
+        if mode == 'res':
+            new_val = not self.show_r1_res_var.get()
+            self.show_r1_res_var.set(new_val)
+            self.btn_r1_res.config(relief="sunken" if new_val else "raised",
+                                   bg="#D3D3D3" if new_val else self.default_btn_bg)
+        elif mode == 'pro':
+            new_val = not self.show_r1_pro_var.get()
+            self.show_r1_pro_var.set(new_val)
+            self.btn_r1_pro.config(relief="sunken" if new_val else "raised",
+                                   bg="#D3D3D3" if new_val else self.default_btn_bg)
         self._refresh_canvas()
 
     def _set_attr_flex(self, val):
@@ -817,15 +865,22 @@ class ProsthesisLabelerApp:
     def _load_current_image(self):
         ctx = self.data_manager.get_image_context(self.current_img_index)
         if not ctx:
-            messagebox.showinfo("Done", "No more images or index out of bounds.")
+            messagebox.showinfo("Done", "No more images.")
             return
 
         self.runtime_labels = {}
         self.selected_keypoint_id = -1
         self.selected_ann_index = 0
+
+        # [NEW] 初始化逻辑：Round 2 保存过 > Round 1 备份 > 新建
         self._reconstruct_runtime_state(ctx)
 
-        # 更新列表 UI
+        # [NEW] 恢复废弃状态
+        is_disc = ctx.get("is_discarded", False)
+        self.is_discarded_var.set(is_disc)
+        self._update_discard_btn_visual()
+
+        # Update Listbox
         self.ann_listbox.delete(0, tk.END)
         ld_anns = ctx['ld_anns']
         if ld_anns:
@@ -840,12 +895,10 @@ class ProsthesisLabelerApp:
         self.info_var.set(f"{ctx['index_str']} : {rel_path}")
         self._update_counter()
 
-        # [关键优化] 在这里加载原始大图，只加载一次！
         try:
             self.raw_image = Image.open(ctx['full_path']).convert("RGB")
             self.raw_image = ImageOps.exif_transpose(self.raw_image)
 
-            # 计算初始缩放比例
             img_w, img_h = self.raw_image.size
             canvas_w = self.canvas.winfo_width()
             canvas_h = self.canvas.winfo_height()
@@ -855,7 +908,6 @@ class ProsthesisLabelerApp:
             scale_h = canvas_h / img_h
             self.scale = min(scale_w, scale_h, 1.0)
 
-            # 生成初始的 display_image 缓存
             self._update_display_image_cache()
 
         except Exception as e:
@@ -869,41 +921,82 @@ class ProsthesisLabelerApp:
         if self.raw_image is None: return
         new_w = int(self.raw_image.width * self.scale)
         new_h = int(self.raw_image.height * self.scale)
-        # 这一步比较耗时，所以只在 切图 或 缩放 时调用
         self.display_image = self.raw_image.resize((new_w, new_h), Image.Resampling.LANCZOS)
 
+    # [IMPORTANT] 重构状态的核心逻辑
     def _reconstruct_runtime_state(self, ctx):
-        saved_anns = ctx['saved_anns']
+        saved_anns = ctx['saved_anns']  # Round 2
+        r1_anns = ctx['r1_anns']  # Round 1
         ld_anns = ctx['ld_anns']
+
+        # 1. 优先检查是否有已经保存的 Round 2 数据
+        source_anns = []
+        is_from_round2 = False
+
+        if saved_anns:
+            source_anns = saved_anns
+            is_from_round2 = True
+        elif r1_anns:
+            # 2. 如果没有 Round 2 数据，自动复制 Round 1 数据作为起点
+            source_anns = r1_anns
+            is_from_round2 = False
+
+        # 建立映射辅助
         id_to_idx = {ann['id']: i for i, ann in enumerate(ld_anns)}
-        for s_ann in saved_anns:
+
+        for s_ann in source_anns:
             if "new_keypoints" not in s_ann: continue
+
+            # 找到对应的 person index
             target_idx = None
             if s_ann.get('id') in id_to_idx:
                 target_idx = id_to_idx[s_ann['id']]
             elif not ld_anns:
                 target_idx = 0
+
             if target_idx is not None:
+                # 深度复制数据，因为接下来我们要修改它
                 recovered_data = defaultdict(lambda: [-1, -1, -1, -1, False])
-                for k, v in s_ann["new_keypoints"].items():
-                    val_list = list(v)
+                source_kps = s_ann["new_keypoints"]
+
+                for k, v in source_kps.items():
+                    kp_id = int(k)
+
+                    # [MODIFIED] 如果是从 Round 1 复制而来，过滤掉非假肢点（即不复制残肢点）
+                    if not is_from_round2:
+                        if kp_id not in Config.PROSTHETIC_IDS:
+                            continue
+
+                    # 确保是列表且深度拷贝，避免引用同一个对象
+                    val_list = list(copy.deepcopy(v))
                     if not val_list or val_list[0] == -1: continue
                     while len(val_list) < 5: val_list.append(False if len(val_list) == 4 else -1)
-                    recovered_data[int(k)] = val_list
+                    recovered_data[kp_id] = val_list
+
                 self.runtime_labels[target_idx] = recovered_data
+
+        # 确保选中项初始化
         if self.selected_ann_index not in self.runtime_labels:
             self.runtime_labels[self.selected_ann_index] = defaultdict(lambda: [-1, -1, -1, -1, False])
 
     def _refresh_canvas(self):
         ctx = self.data_manager.get_image_context(self.current_img_index)
         if not ctx: return
+
+        # 获取当前图的 Round 1 原始数据，传给 visualizer 做 Ghost 显示
+        r1_anns_list = ctx['r1_anns']
+
         tk_img = self.visualizer.render(
             self.display_image,
             ctx['ld_anns'], self.selected_ann_index, self.runtime_labels,
+            r1_anns_map=r1_anns_list,
             show_coco_kps=self.show_coco_var.get(),
             show_extra_kps=self.show_extra_var.get(),
             show_bbox=self.show_bbox_var.get(),
             show_connections=self.show_connection_var.get(),
+            show_r1_res=self.show_r1_res_var.get(),
+            show_r1_pro=self.show_r1_pro_var.get(),
+            is_discarded=self.is_discarded_var.get(),  # [NEW]
             scale=self.scale
         )
         if tk_img:
@@ -913,14 +1006,14 @@ class ProsthesisLabelerApp:
     def _prune_garbage(self):
         for ann_idx in list(self.runtime_labels.keys()):
             person_labels = self.runtime_labels[ann_idx]
-            keys_to_delete = [
-                k for k, v in person_labels.items()
-                if isinstance(v, list) and len(v) > 0 and v[0] == -1
-            ]
-            for k in keys_to_delete:
-                del person_labels[k]
+            keys_to_delete = [k for k, v in person_labels.items() if isinstance(v, list) and len(v) > 0 and v[0] == -1]
+            for k in keys_to_delete: del person_labels[k]
 
     def _validate_before_save(self):
+        # [NEW] 如果被标记为废弃，跳过校验，允许直接保存
+        if self.is_discarded_var.get():
+            return True
+
         self._prune_garbage()
         for ann_idx, kps in self.runtime_labels.items():
             for kp_id, val in kps.items():
@@ -932,23 +1025,26 @@ class ProsthesisLabelerApp:
                 if kp_id in Config.PROSTHETIC_IDS:
                     flex = val[3] if len(val) > 3 else -1
                     if flex == -1:
-                        messagebox.showerror("Validation Error",
-                                             f"#{ann_idx} {kp_name}: It's a prosthetic point, please set 'Flex'.")
+                        messagebox.showerror("Validation Error", f"#{ann_idx} {kp_name}: Set 'Flex' for prosthetic.")
                         return False
         return True
 
-    def _save_current(self, sync=False):  # 增加 sync 参数
+    def _save_current(self, sync=False):
         if not self._validate_before_save(): return False
         ctx = self.data_manager.get_image_context(self.current_img_index)
         if not ctx: return True
-        # 传递 sync 给 DataManager
-        count = self.data_manager.save_annotation_result(ctx['id'], self.runtime_labels, sync=sync)
+        count = self.data_manager.save_annotation_result(
+            ctx['id'],
+            self.runtime_labels,
+            is_marked_deleted=self.is_discarded_var.get(),  # [NEW]
+            sync=sync
+        )
         self._update_counter(saved_count=count)
         return True
 
     def _update_counter(self, saved_count=None):
         if saved_count is None: saved_count = len(self.data_manager.finished_ids)
-        self.counter_var.set(f"Saved: {saved_count}")
+        self.counter_var.set(f"Saved (R2): {saved_count}")
 
     def _on_ann_list_select(self, event):
         sel = self.ann_listbox.curselection()
@@ -962,7 +1058,7 @@ class ProsthesisLabelerApp:
 
     def _on_canvas_click(self, event):
         if self.selected_keypoint_id < 0:
-            messagebox.showwarning("Tip", "Please select a keypoint button first.")
+            messagebox.showwarning("Tip", "Select a keypoint button first.")
             return
         if self.selected_ann_index not in self.runtime_labels:
             self.runtime_labels[self.selected_ann_index] = defaultdict(lambda: [-1, -1, -1, -1, False])
