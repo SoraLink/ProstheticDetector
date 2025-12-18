@@ -881,6 +881,9 @@ class ProsthesisLabelerApp:
 
     def _set_attr_flex(self, val):
         if self.selected_keypoint_id < 0: return
+        if self.selected_keypoint_id >= 17:
+            messagebox.showinfo("提示", f"端点 (End) 不需要设置活动性属性。")
+            return
         if self.selected_keypoint_id <= 8:
             messagebox.showwarning("Warning", "Flexibility setting not needed for residual limbs")
             return
