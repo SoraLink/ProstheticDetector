@@ -53,6 +53,10 @@ class Config:
         14: 'Right prosthetic knee',
         15: 'Left prosthetic ankle',
         16: 'Right prosthetic ankle',
+        17: 'Left Prosthetic Wrist End',
+        18: 'Right Prosthetic Wrist End',
+        19: 'Left Prosthetic Ankle End',
+        20: 'Right Prosthetic Ankle End',
     }
 
     SHORT_NAMES = {
@@ -64,23 +68,40 @@ class Config:
         11: 'L-Pros\nWrist', 12: 'R-Pros\nWrist',
         13: 'L-Pros\nKnee', 14: 'R-Pros\nKnee',
         15: 'L-Pros\nAnkle', 16: 'R-Pros\nAnkle',
+        17: 'L-Wrist\nEnd', 18: 'R-Wrist\nEnd',
+        19: 'L-Ankle\nEnd', 20: 'R-Ankle\nEnd',
     }
 
+    MUTUAL_EXCLUSIVE_PAIRS = {
+        17: 11,
+        18: 12,
+        19: 15,
+        20: 16,
+    }
+
+    REVERSE_MUTUAL_PAIRS = {v: k for k, v in MUTUAL_EXCLUSIVE_PAIRS.items()}
+
     PROSTHETIC_IDS = {9, 10, 11, 12, 13, 14, 15, 16}
+    END_POINT_IDS = {17, 18, 19, 20}
     UPPER_RESIDUAL_IDS = {1, 2, 5, 6}
     COLORS = {
         1: '#FF0000', 2: '#00FF00', 3: '#FF00FF', 4: '#00FFFF',
         5: '#A52A2A', 6: '#FFC0CB', 7: '#000080', 8: '#8B4513',
         9: '#0000FF', 10: '#B8860B', 11: '#FFA500', 12: '#800080',
         13: '#808000', 14: '#008080', 15: '#DC143C', 16: '#4B0082',
+        17: '#FF4500', 18: '#FF4500', 19: '#FFD700', 20: '#FFD700',
     }
 
     # R1 参考点的颜色 (灰色)
     R1_COLOR = '#A0A0A0'
 
     BUTTON_LAYOUT = [
-        [1, 2, 9, 10], [3, 4, 11, 12], [5, 6, 13, 14], [7, 8, 15, 16]
+        [1, 2, 9, 10],
+        [3, 4, 11, 17, 12, 18],  # 手腕及端点
+        [5, 6, 13, 14],
+        [7, 8, 15, 19, 16, 20]  # 脚踝及端点
     ]
+
     COCO_SKELETON = [
         (0, 1), (0, 2), (1, 3), (2, 4), (5, 6), (5, 7), (7, 9), (6, 8), (8, 10),
         (11, 12), (11, 13), (13, 15), (12, 14), (14, 16), (5, 11), (6, 12)
@@ -88,10 +109,10 @@ class Config:
     COCO_LEFT_SIDE = {5, 7, 9, 11, 13, 15}
     COCO_RIGHT_SIDE = {6, 8, 10, 12, 14, 16}
     PROSTHETIC_CONNECTIONS = [
-        (1, 9), (9, 11), (3, 11),
-        (2, 10), (10, 12), (4, 12),
-        (5, 13), (13, 15), (7, 15),
-        (6, 14), (14, 16), (8, 16),
+        (1, 9), (9, 11), (9, 17), (3, 11), (3, 17),
+        (2, 10), (10, 12), (10, 18), (4, 12), (4, 18),
+        (5, 13), (13, 15), (13, 19), (7, 15), (7, 19),
+        (6, 14), (14, 16), (14, 20), (8, 16), (8, 20),
     ]
 
 
@@ -674,16 +695,20 @@ class ProsthesisLabelerApp:
     def _setup_control_buttons(self, parent):
         kp_panel = tk.Frame(parent, bd=1, relief=tk.SUNKEN)
         kp_panel.pack(side=tk.LEFT, fill=tk.Y, padx=10, pady=10)
-        for i in range(4): kp_panel.columnconfigure(i, weight=1)
-        for i in range(4): kp_panel.rowconfigure(i, weight=1)
+        for i in range(6):
+            kp_panel.columnconfigure(i, weight=1)
+        for i in range(4):
+            kp_panel.rowconfigure(i, weight=1)
         for r, row_ids in enumerate(Config.BUTTON_LAYOUT):
             for c, kp_id in enumerate(row_ids):
-                name = Config.SHORT_NAMES.get(kp_id, Config.KEYPOINTS[kp_id])
+                name = Config.SHORT_NAMES.get(kp_id, Config.KEYPOINTS.get(kp_id, "UNK"))
                 color = Config.COLORS.get(kp_id, 'black')
-                tk.Button(kp_panel, text=name, fg=color, font=("Arial", 9, "bold"), width=15, height=3, bg="#f9f9f9",
-                          wraplength=100, command=lambda k=kp_id: self._set_tool_keypoint(k)).grid(row=r, column=c,
-                                                                                                   padx=2, pady=2,
-                                                                                                   sticky="nsew")
+                btn_bg = "#e1f5fe" if kp_id >= 17 else "#f9f9f9"
+
+                tk.Button(kp_panel, text=name, fg=color, font=("Arial", 8, "bold"),
+                          width=10, height=3, bg=btn_bg,
+                          wraplength=80, command=lambda k=kp_id: self._set_tool_keypoint(k)).grid(
+                    row=r, column=c, padx=2, pady=2, sticky="nsew")
 
         tools_panel = tk.Frame(parent)
         tools_panel.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=10, pady=5)
@@ -693,7 +718,6 @@ class ProsthesisLabelerApp:
         tk.Label(info_frame, textvariable=self.counter_var, font=("Arial", 11, "bold"), fg="blue").pack(side=tk.RIGHT)
         tk.Frame(tools_panel, height=2, bd=1, relief=tk.GROOVE).pack(fill=tk.X, pady=5)
 
-        # [NEW] 废弃标记按钮
         status_frame = tk.Frame(tools_panel)
         status_frame.pack(fill=tk.X, pady=2)
         self.btn_discard = tk.Button(status_frame, text="标记废弃 (Mark as Bad)", command=self._toggle_discard,
@@ -1015,6 +1039,7 @@ class ProsthesisLabelerApp:
             return True
 
         self._prune_garbage()
+
         for ann_idx, kps in self.runtime_labels.items():
             for kp_id, val in kps.items():
                 kp_name = Config.KEYPOINTS.get(kp_id, f"ID {kp_id}")
@@ -1027,6 +1052,7 @@ class ProsthesisLabelerApp:
                     if flex == -1:
                         messagebox.showerror("Validation Error", f"#{ann_idx} {kp_name}: Set 'Flex' for prosthetic.")
                         return False
+
         return True
 
     def _save_current(self, sync=False):
@@ -1060,12 +1086,29 @@ class ProsthesisLabelerApp:
         if self.selected_keypoint_id < 0:
             messagebox.showwarning("Tip", "Select a keypoint button first.")
             return
+
+        target_id = self.selected_keypoint_id
+        exclusive_id = None
+
+        if target_id in Config.MUTUAL_EXCLUSIVE_PAIRS:
+            exclusive_id = Config.MUTUAL_EXCLUSIVE_PAIRS[target_id]
+        elif target_id in Config.REVERSE_MUTUAL_PAIRS:
+            exclusive_id = Config.REVERSE_MUTUAL_PAIRS[target_id]
+
+        if exclusive_id and self.selected_ann_index in self.runtime_labels:
+            if exclusive_id in self.runtime_labels[self.selected_ann_index]:
+                # 发现互斥点，执行删除逻辑
+                ex_name = Config.KEYPOINTS.get(exclusive_id)
+                # 可选：messagebox 提示，或者直接静默覆盖（推荐静默覆盖，体验更流畅）
+                del self.runtime_labels[self.selected_ann_index][exclusive_id]
+
         if self.selected_ann_index not in self.runtime_labels:
             self.runtime_labels[self.selected_ann_index] = defaultdict(lambda: [-1, -1, -1, -1, False])
 
         current_points = self.runtime_labels[self.selected_ann_index]
         if self.selected_keypoint_id not in current_points:
-            current_points[self.selected_keypoint_id] = [-1, -1, -1, -1, False]
+            default_flex = 0 if self.selected_keypoint_id >= 17 else -1
+            current_points[self.selected_keypoint_id] = [-1, -1, -1, default_flex, False]
 
         real_x = int(event.x / self.scale)
         real_y = int(event.y / self.scale)
