@@ -96,10 +96,10 @@ class Config:
     R1_COLOR = '#A0A0A0'
 
     BUTTON_LAYOUT = [
-        [1, 2, 9, 10],
-        [3, 4, 11, 17, 12, 18],  # 手腕及端点
-        [5, 6, 13, 14],
-        [7, 8, 15, 19, 16, 20]  # 脚踝及端点
+        [1, 2, None, 9, 10, None],
+        [3, 4, 17, 11, 12, 18],  # 手腕及端点
+        [5, 6, None, 13, 14, None],
+        [7, 8, 19, 15, 16, 20]  # 脚踝及端点
     ]
 
     COCO_SKELETON = [
@@ -701,6 +701,9 @@ class ProsthesisLabelerApp:
             kp_panel.rowconfigure(i, weight=1)
         for r, row_ids in enumerate(Config.BUTTON_LAYOUT):
             for c, kp_id in enumerate(row_ids):
+                if kp_id is None:
+                    tk.Label(kp_panel, text="", width=10).grid(row=r, column=c)
+                    continue
                 name = Config.SHORT_NAMES.get(kp_id, Config.KEYPOINTS.get(kp_id, "UNK"))
                 color = Config.COLORS.get(kp_id, 'black')
                 btn_bg = "#e1f5fe" if kp_id >= 17 else "#f9f9f9"
@@ -739,6 +742,7 @@ class ProsthesisLabelerApp:
             attr_frame, text="Skip Knee/Elbow", variable=self.skip_joint_var,
             command=self._on_skip_toggle, fg="red", font=("Arial", 9, "bold")
         )
+
         tk.Button(attr_frame, text="Clear", bg="#ffcccc", command=self._clear_current_point).pack(side=tk.RIGHT, padx=5)
 
         # Toggle Frame
@@ -799,6 +803,7 @@ class ProsthesisLabelerApp:
                 command=self._start_upload_thread
             )
             self.btn_upload.pack(fill=tk.X, ipady=5)
+
 
     def _toggle_discard(self):
         new_val = not self.is_discarded_var.get()
@@ -1087,38 +1092,57 @@ class ProsthesisLabelerApp:
             messagebox.showwarning("Tip", "Select a keypoint button first.")
             return
 
-        target_id = self.selected_keypoint_id
-        exclusive_id = None
-
-        if target_id in Config.MUTUAL_EXCLUSIVE_PAIRS:
-            exclusive_id = Config.MUTUAL_EXCLUSIVE_PAIRS[target_id]
-        elif target_id in Config.REVERSE_MUTUAL_PAIRS:
-            exclusive_id = Config.REVERSE_MUTUAL_PAIRS[target_id]
-
-        if exclusive_id and self.selected_ann_index in self.runtime_labels:
-            if exclusive_id in self.runtime_labels[self.selected_ann_index]:
-                # 发现互斥点，执行删除逻辑
-                ex_name = Config.KEYPOINTS.get(exclusive_id)
-                # 可选：messagebox 提示，或者直接静默覆盖（推荐静默覆盖，体验更流畅）
-                del self.runtime_labels[self.selected_ann_index][exclusive_id]
-
         if self.selected_ann_index not in self.runtime_labels:
             self.runtime_labels[self.selected_ann_index] = defaultdict(lambda: [-1, -1, -1, -1, False])
 
         current_points = self.runtime_labels[self.selected_ann_index]
-        if self.selected_keypoint_id not in current_points:
-            default_flex = 0 if self.selected_keypoint_id >= 17 else -1
-            current_points[self.selected_keypoint_id] = [-1, -1, -1, default_flex, False]
 
         real_x = int(event.x / self.scale)
         real_y = int(event.y / self.scale)
 
-        current_points[self.selected_keypoint_id][0] = real_x
-        current_points[self.selected_keypoint_id][1] = real_y
+        # 正常赋值或更新
+        if self.selected_keypoint_id not in current_points:
+            default_flex = 0 if self.selected_keypoint_id >= 17 else -1
+            current_points[self.selected_keypoint_id] = [real_x, real_y, -1, default_flex, False]
+        else:
+            current_points[self.selected_keypoint_id][0] = real_x
+            current_points[self.selected_keypoint_id][1] = real_y
+
         self._refresh_canvas()
 
     def _set_tool_keypoint(self, kp_id):
+        # 1. 设置当前选中的工具 ID
         self.selected_keypoint_id = kp_id
+
+        # 2. 检查当前标注中是否有与之互斥的点 (11<->17, 12<->18, 15<->19, 16<->20)
+        exclusive_id = None
+        if kp_id in Config.MUTUAL_EXCLUSIVE_PAIRS:
+            exclusive_id = Config.MUTUAL_EXCLUSIVE_PAIRS[kp_id]
+        elif kp_id in Config.REVERSE_MUTUAL_PAIRS:
+            exclusive_id = Config.REVERSE_MUTUAL_PAIRS[kp_id]
+
+        # 3. 如果互斥点存在，立即执行“静默转换”
+        if exclusive_id and self.selected_ann_index in self.runtime_labels:
+            current_points = self.runtime_labels[self.selected_ann_index]
+
+            # 只有当旧点确实存在坐标时才转换
+            if exclusive_id in current_points and current_points[exclusive_id][0] != -1:
+                old_data = list(copy.deepcopy(current_points[exclusive_id]))
+
+                # 转换属性适配
+                if kp_id >= 17:  # 如果切到端点
+                    if old_data[3] == -1: old_data[3] = 0
+                else:  # 如果切回关节
+                    old_data[3] = -1
+
+                # 偷梁换柱
+                del current_points[exclusive_id]
+                current_points[kp_id] = old_data
+
+                # 转换完直接刷新画布，此时你会看到点变色了
+                self._refresh_canvas()
+
+        # 4. 原有的控制逻辑 (处理残肢 Skip 按钮的显示/隐藏)
         if kp_id in Config.UPPER_RESIDUAL_IDS:
             self.chk_skip_joint.pack(side=tk.LEFT, padx=10)
             is_skip = False
