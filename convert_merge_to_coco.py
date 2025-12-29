@@ -4,42 +4,90 @@ import os
 # ================= 映射配置 =================
 
 # 1. 最终输出的关键点总数
-# 0-16: COCO 标准点 (包含真人和假肢)
-# 17-24: 残肢端点 (Residual Ends)
 TOTAL_KPS = 25
 
-# 2. 你的工具 ID (1-20) 到 COCO Index (0-16) 的映射
-# 只有假肢点需要映射进 COCO 骨架，残肢点追加在后面
-# 格式: { 工具ID: COCO索引 }
+# 2. 假肢点映射 (工具ID -> COCO索引)
 PROSTHETIC_TO_COCO_MAP = {
-    # 假肢肘 -> COCO Elbow
-    9: 7,  # L-Elbow
-    10: 8,  # R-Elbow
-
-    # 假肢手腕 -> COCO Wrist
-    11: 9,  # L-Wrist
-    12: 10,  # R-Wrist
-    17: 9,  # L-Wrist End (归并到左手腕)
-    18: 10,  # R-Wrist End (归并到右手腕)
-
-    # 假肢膝 -> COCO Knee
-    13: 13,  # L-Knee
-    14: 14,  # R-Knee
-
-    # 假肢踝 -> COCO Ankle
-    15: 15,  # L-Ankle
-    16: 16,  # R-Ankle
-    19: 15,  # L-Ankle End (归并到左脚踝)
-    20: 16  # R-Ankle End (归并到右脚踝)
+    9: 7, 10: 8,  # Elbows
+    11: 9, 12: 10,  # Wrists
+    17: 9, 18: 10,  # Wrist Ends
+    13: 13, 14: 14,  # Knees
+    15: 15, 16: 16,  # Ankles
+    19: 15, 20: 16  # Ankle Ends
 }
 
-# 3. 残肢点映射 (工具ID -> 新的数组索引 17-24)
+# 3. 残肢点映射 (工具ID -> 新索引 17-24)
 RESIDUAL_TO_INDEX_MAP = {
-    1: 17, 2: 18,  # Elbow Above
-    3: 19, 4: 20,  # Elbow Below
-    5: 21, 6: 22,  # Knee Above
-    7: 23, 8: 24  # Knee Below
+    1: 17, 2: 18,
+    3: 19, 4: 20,
+    5: 21, 6: 22,
+    7: 23, 8: 24
 }
+
+# 4. Skip 逻辑控制映射
+# 格式: { 控制者ID(残肢点): 被控制的COCO索引(关节) }
+SKIP_CONTROL_MAP = {
+    1: 7,  # ID 1 (Left Elbow Res Above)  -> Controls COCO 7 (Left Elbow)
+    2: 8,  # ID 2 (Right Elbow Res Above) -> Controls COCO 8 (Right Elbow)
+    5: 13,  # ID 5 (Left Knee Res Above)   -> Controls COCO 13 (Left Knee)
+    6: 14  # ID 6 (Right Knee Res Above)  -> Controls COCO 14 (Right Knee)
+}
+
+
+def recalculate_bbox(keypoints_list, img_w, img_h, padding_ratio=1.25):
+    """
+    根据关键点重新计算 BBox，并给予一定的扩充 (Padding)。
+    """
+    valid_x = []
+    valid_y = []
+
+    # 遍历所有点 (步长为4)
+    for i in range(0, len(keypoints_list), 4):
+        x = keypoints_list[i]
+        y = keypoints_list[i + 1]
+        v = keypoints_list[i + 2]
+
+        # 过滤条件：
+        # 1. v > 0: 必须是可见/有效点
+        # 2. x > 1 and y > 1: 必须有有效坐标
+        # 注意: Skip 点 [0, 0, 2, 2] 虽然 v=2，但 x=0，会被正确排除，不会拉偏 BBox
+        if v > 0 and x > 1 and y > 1:
+            valid_x.append(x)
+            valid_y.append(y)
+
+    # 如果没有有效点 (极少见)，返回 None
+    if not valid_x or not valid_y:
+        return None
+
+    min_x, max_x = min(valid_x), max(valid_x)
+    min_y, max_y = min(valid_y), max(valid_y)
+
+    width = max_x - min_x
+    height = max_y - min_y
+
+    # 计算中心点
+    cx = (min_x + max_x) / 2.0
+    cy = (min_y + max_y) / 2.0
+
+    # 扩张
+    new_width = width * padding_ratio
+    new_height = height * padding_ratio
+
+    # 计算新的左上角
+    new_x = cx - new_width / 2.0
+    new_y = cy - new_height / 2.0
+
+    # 边界截断 (Clip to image boundaries)
+    new_x = max(0, new_x)
+    new_y = max(0, new_y)
+
+    # 防止右下角越界
+    if new_x + new_width > img_w:
+        new_width = img_w - new_x
+    if new_y + new_height > img_h:
+        new_height = img_h - new_y
+
+    return [new_x, new_y, new_width, new_height]
 
 
 def convert_json(input_path, output_path):
@@ -55,16 +103,13 @@ def convert_json(input_path, output_path):
         "annotations": []
     }
 
-    # --- 1. 构建 Categories (25个点) ---
-    # COCO 原名
+    # --- 1. Categories ---
     coco_kps = [
         "nose", "left_eye", "right_eye", "left_ear", "right_ear",
         "left_shoulder", "right_shoulder", "left_elbow", "right_elbow",
         "left_wrist", "right_wrist", "left_hip", "right_hip",
         "left_knee", "right_knee", "left_ankle", "right_ankle"
     ]
-
-    # 残肢名 (追加在后面)
     res_kps = [
         "L-Elbow-Res-Above", "R-Elbow-Res-Above",
         "L-Elbow-Res-Below", "R-Elbow-Res-Below",
@@ -72,86 +117,83 @@ def convert_json(input_path, output_path):
         "L-Knee-Res-Below", "R-Knee-Res-Below"
     ]
 
+    # 【修复】完整填入骨架列表，防止可视化报错
+    coco_skeleton = [
+        [16, 14], [14, 12], [17, 15], [15, 13],
+        [12, 13], [6, 12], [7, 13], [6, 7],
+        [6, 8], [7, 9], [8, 10], [9, 11],
+        [2, 3], [1, 2], [1, 3], [2, 4], [3, 5], [4, 6], [5, 7]
+    ]
+    ld_skeleton = [
+        [6, 18], [7, 19], [8, 20], [9, 21],
+        [12, 22], [13, 23], [14, 24], [15, 25]
+    ]
+
     new_cat = {
         "id": 1,
         "name": "person_prosthesis_merged",
         "supercategory": "person",
         "keypoints": coco_kps + res_kps,
-        "num_keypoints": TOTAL_KPS
+        "num_keypoints": TOTAL_KPS,
+        "skeleton": coco_skeleton + ld_skeleton
     }
     new_data["categories"].append(new_cat)
 
-    # --- 2. 过滤图片 ---
+    # --- 2. Images ---
     valid_image_ids = set()
+    img_dims = {}
     for img in data.get("images", []):
         new_data["images"].append(img)
         valid_image_ids.add(img['id'])
+        img_dims[img['id']] = (img.get('width', 0), img.get('height', 0))
 
-    # --- 3. 处理标注 ---
+    # --- 3. Annotations ---
     for ann in data.get("annotations", []):
+        if ann["image_id"] not in valid_image_ids: continue
 
-        # 初始化 25 个点的数组: [x, y, v, type]
-        # 默认全部初始化为 0,0,0,2 (不存在)
-        final_kps_list = [[0, 0, 0, 2] for _ in range(TOTAL_KPS)]
+        final_kps_list = [[0, 0, 0, 0] for _ in range(TOTAL_KPS)]
 
-        # Step A: 填入原始 COCO 数据 (0-16)
-        # 默认认为这些是 Type 0 (Human)
+        # Step A: 填入原始 COCO 数据
         old_kps = ann.get("keypoints", [])
         for i in range(17):
             if i * 3 + 2 < len(old_kps):
-                x = old_kps[i * 3]
-                y = old_kps[i * 3 + 1]
-                v = old_kps[i * 3 + 2]
+                x, y, v = old_kps[i * 3], old_kps[i * 3 + 1], old_kps[i * 3 + 2]
                 if v > 0:
-                    # 有效的 COCO 点，填入，标记为 Type 0
-                    final_kps_list[i] = [x, y, v, 0]
-                else:
-                    # 无效点，保持 Type 2
-                    final_kps_list[i] = [0, 0, 0, 2]
+                    final_kps_list[i] = [x, y, v, 0]  # 默认为 Human (0)
 
-        # Step B: 使用工具的新标注 (New Keypoints) 进行 覆盖 或 追加
         new_kps_dict = ann.get("new_keypoints", {})
 
-        # 遍历工具里的所有 ID (1-20)
-        # 注意：这里我们遍历 dict 的 keys，因为没标的我们就不动
+        # Step B-1: 填入工具标注的点
         for tid_str, val in new_kps_dict.items():
             tid = int(tid_str)
+            if not isinstance(val, list) or len(val) < 3:
+                raise ValueError("invalid value of id: {}, {}".format(tid_str, val))
 
-            # 数据校验
-            if not isinstance(val, list) or len(val) < 3: continue
             raw_x, raw_y, raw_vis = val[0], val[1], val[2]
-            is_skip = val[4] if len(val) > 4 else False
 
-            # 确定这个点应该填在 final_kps_list 的哪个 index
             target_idx = -1
             point_type = 2
 
-            # 1. 判断是否是残肢 (Type 0)
             if tid in RESIDUAL_TO_INDEX_MAP:
                 target_idx = RESIDUAL_TO_INDEX_MAP[tid]
-                point_type = 0  # 残肢也是肉体
-
-            # 2. 判断是否是假肢 (Type 1) -> 覆盖 COCO 槽位
+                point_type = 0  # 残肢 (Exist)
             elif tid in PROSTHETIC_TO_COCO_MAP:
                 target_idx = PROSTHETIC_TO_COCO_MAP[tid]
-                point_type = 1  # 假肢
+                point_type = 1  # 假肢 (Exist)
 
-            if target_idx == -1: continue  # 未知 ID，跳过
-
-            # 3. 填入数据
-            if is_skip:
-                # 显式 Skip：设为 0,0,0,2 (不存在)
-                final_kps_list[target_idx] = [0, 0, 0, 2]
-            elif raw_x == -1:
-                # 无效数据：不操作，保留 Step A 的 COCO 值 (如果是非覆盖位则保留空)
-                # 或者如果你希望工具里的 "未标注" 意味着 "删除 COCO 的标注"，则这里要设为 [0,0,0,2]
-                # 通常：如果工具里没标，说明没修过，保留原值比较安全。除非显式 -1 意味着擦除。
-                pass
-            else:
-                # 有效的新标注 -> 强制覆盖
+            if target_idx != -1 and raw_x != -1:
                 final_kps_list[target_idx] = [raw_x, raw_y, raw_vis, point_type]
 
-        # Step C: 展平数组
+        # Step B-2: 处理 Skip 逻辑
+        for ctrl_id, target_coco_idx in SKIP_CONTROL_MAP.items():
+            ctrl_id_str = str(ctrl_id)
+            if ctrl_id_str in new_kps_dict:
+                val = new_kps_dict[ctrl_id_str]
+                if len(val) > 4 and val[4] is True:
+                    # Skip: 坐标归零，Vis=2 (Visible)，Type=2 (Not Exists)
+                    final_kps_list[target_coco_idx] = [0, 0, 2, 2]
+
+        # Step C: 展平
         flat_kps = []
         num_valid = 0
         for item in final_kps_list:
@@ -161,17 +203,29 @@ def convert_json(input_path, output_path):
         new_ann = ann.copy()
         new_ann["keypoints"] = flat_kps
         new_ann["num_keypoints"] = num_valid
-        if "new_keypoints" in new_ann: del new_ann["new_keypoints"]
 
+        # --- Step D: BBox 重算 ---
+        # 【修复】直接获取，避免 .get() 返回 None 导致解包错误
+        # 之前的逻辑保证了 valid_image_ids 存在，所以 img_dims 必有 key
+        img_w, img_h = img_dims[ann['image_id']]
+
+        if img_w <= 0 or img_h <= 0:
+            raise ValueError(f"Invalid image dimensions for Image ID {ann['image_id']}: ({img_w}, {img_h})")
+
+        new_bbox = recalculate_bbox(flat_kps, img_w, img_h, padding_ratio=1.25)
+
+        if new_bbox:
+            new_ann['bbox'] = new_bbox
+            new_ann['area'] = new_bbox[2] * new_bbox[3]
+
+        if "new_keypoints" in new_ann: del new_ann["new_keypoints"]
         new_data["annotations"].append(new_ann)
 
-    # --- 4. 保存 ---
+    # --- 4. Save ---
     print(f"Output: {output_path}")
-    print(f"Keypoints per person: {TOTAL_KPS} (x4 dims)")
-
     with open(output_path, 'w', encoding='utf-8') as f:
         json.dump(new_data, f, ensure_ascii=False)
 
 
 if __name__ == "__main__":
-    convert_json("labels_round2.json", "train_annotations_merged.json")
+    convert_json("labels_test_round2.json", "test_annotations_merged.json")
