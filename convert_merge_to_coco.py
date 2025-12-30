@@ -32,6 +32,12 @@ ANATOMICAL_SUPPRESSION_MAP = {
     23: [15], 24: [16]  # 小腿残肢 -> 踝没了
 }
 
+CHAIN_DEPENDENCY = {
+    7: 9,   # 左肘 看 左腕
+    8: 10,  # 右肘 看 右腕
+    13: 15, # 左膝 看 左踝
+    14: 16  # 右膝 看 右踝
+}
 
 def recalculate_bbox(keypoints_list_3d, img_w, img_h, padding_ratio=1.25):
     """根据 3D keypoints (x,y,v) 重算 bbox"""
@@ -174,7 +180,7 @@ def convert_json(input_path, output_path):
             if ctrl_id_str in new_kps_dict:
                 val = new_kps_dict[ctrl_id_str]
                 if len(val) > 4 and val[4] is True:
-                    final_kps_list[target_coco_idx] = [0, 0, 2, 2]  # 强制 Missing
+                    final_kps_list[target_coco_idx] = [0, 0, 0, 2]  # 强制 Missing
 
         # =======================================================
         # Step C: 解剖抑制 (安全版) - 解决图外假肢问题
@@ -191,11 +197,20 @@ def convert_json(input_path, output_path):
                 for joint_idx in target_joints:
                     current_joint = final_kps_list[joint_idx]
                     current_type = current_joint[3]
+                    if current_type != 0:
+                        continue
 
-                    # 【核心保护逻辑】
-                    # 如果下游是默认初始化的 Normal(0)，说明没标/看不见 -> 改为 Missing(2)
-                    # 如果下游已经是 Prosthetic(1)，说明你特意标了 -> 不动它！
-                    if current_type == 0:
+                    is_saved_by_downstream = False
+                    if joint_idx in CHAIN_DEPENDENCY:
+                        distal_idx = CHAIN_DEPENDENCY[joint_idx]
+                        distal_node = final_kps_list[distal_idx]
+                        distal_type = distal_node[3]
+
+                        if distal_type == 1:
+                            is_saved_by_downstream = True
+                    if is_saved_by_downstream:
+                        final_kps_list[joint_idx] = [0, 0, 0, 1]
+                    else:
                         final_kps_list[joint_idx] = [0, 0, 0, 2]
 
         # =======================================================
