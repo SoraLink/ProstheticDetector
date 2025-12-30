@@ -151,7 +151,12 @@ def convert_json(input_path, output_path):
     for ann in data.get("annotations", []):
         if ann["image_id"] not in valid_image_ids: continue
 
-        final_kps_list = [[0, 0, 0, 0] for _ in range(TOTAL_KPS)]
+        final_kps_list = []
+        for _ in range(17):
+            final_kps_list.append([0, 0, 0, 0])
+
+        for _ in range(TOTAL_KPS - 17):
+            final_kps_list.append([0, 0, 0, 2])
 
         # Step A: 填入原始 COCO 数据
         old_kps = ann.get("keypoints", [])
@@ -223,7 +228,7 @@ def convert_json(input_path, output_path):
             new_ann['bbox'] = new_bbox
             new_ann['area'] = new_bbox[2] * new_bbox[3]
 
-        if "new_keypoints" in new_ann: del new_ann["new_keypoints"]
+        # if "new_keypoints" in new_ann: del new_ann["new_keypoints"]
         new_data["annotations"].append(new_ann)
 
     # --- 4. Save ---
@@ -233,4 +238,4 @@ def convert_json(input_path, output_path):
 
 
 if __name__ == "__main__":
-    convert_json("labels_test_round2.json", "test_annotations_merged.json")
+    convert_json("labels_train_round2.json", "train_annotations_merged.json")
