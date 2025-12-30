@@ -1,61 +1,51 @@
 import json
 import os
 
-# ================= 映射配置 =================
+# ================= 1. 映射配置 =================
 
-# 1. 最终输出的关键点总数
 TOTAL_KPS = 25
 
-# 2. 假肢点映射 (工具ID -> COCO索引)
+# 假肢点映射 (工具ID -> COCO索引)
 PROSTHETIC_TO_COCO_MAP = {
-    9: 7, 10: 8,  # Elbows
-    11: 9, 12: 10,  # Wrists
-    17: 9, 18: 10,  # Wrist Ends
-    13: 13, 14: 14,  # Knees
-    15: 15, 16: 16,  # Ankles
-    19: 15, 20: 16  # Ankle Ends
+    9: 7, 10: 8, 11: 9, 12: 10,
+    17: 9, 18: 10, 13: 13, 14: 14,
+    15: 15, 16: 16, 19: 15, 20: 16
 }
 
-# 3. 残肢点映射 (工具ID -> 新索引 17-24)
+# 残肢点映射 (工具ID -> 新索引 17-24)
 RESIDUAL_TO_INDEX_MAP = {
-    1: 17, 2: 18,
-    3: 19, 4: 20,
-    5: 21, 6: 22,
-    7: 23, 8: 24
+    1: 17, 2: 18, 3: 19, 4: 20,
+    5: 21, 6: 22, 7: 23, 8: 24
 }
 
-# 4. Skip 逻辑控制映射
-# 格式: { 控制者ID(残肢点): 被控制的COCO索引(关节) }
+# Skip 逻辑 (工具ID -> 强制Missing的COCO索引)
 SKIP_CONTROL_MAP = {
-    1: 7,  # ID 1 (Left Elbow Res Above)  -> Controls COCO 7 (Left Elbow)
-    2: 8,  # ID 2 (Right Elbow Res Above) -> Controls COCO 8 (Right Elbow)
-    5: 13,  # ID 5 (Left Knee Res Above)   -> Controls COCO 13 (Left Knee)
-    6: 14  # ID 6 (Right Knee Res Above)  -> Controls COCO 14 (Right Knee)
+    1: 7, 2: 8, 5: 13, 6: 14
+}
+
+# 解剖抑制映射 (核心逻辑)
+# 格式: { 触发者残肢ID: [要被消灭的下游关节ID列表] }
+ANATOMICAL_SUPPRESSION_MAP = {
+    17: [7, 9], 18: [8, 10],  # 上臂残肢 -> 肘、腕没了
+    19: [9], 20: [10],  # 前臂残肢 -> 腕没了
+    21: [13, 15], 22: [14, 16],  # 大腿残肢 -> 膝、踝没了
+    23: [15], 24: [16]  # 小腿残肢 -> 踝没了
 }
 
 
-def recalculate_bbox(keypoints_list, img_w, img_h, padding_ratio=1.25):
-    """
-    根据关键点重新计算 BBox，并给予一定的扩充 (Padding)。
-    """
+def recalculate_bbox(keypoints_list_3d, img_w, img_h, padding_ratio=1.25):
+    """根据 3D keypoints (x,y,v) 重算 bbox"""
     valid_x = []
     valid_y = []
-
-    # 遍历所有点 (步长为4)
-    for i in range(0, len(keypoints_list), 3):
-        x = keypoints_list[i]
-        y = keypoints_list[i + 1]
-        v = keypoints_list[i + 2]
-
-        # 过滤条件：
-        # 1. v > 0: 必须是可见/有效点
-        # 2. x > 1 and y > 1: 必须有有效坐标
-        # 注意: Skip 点 [0, 0, 2, 2] 虽然 v=2，但 x=0，会被正确排除，不会拉偏 BBox
+    # 步长为 3
+    for i in range(0, len(keypoints_list_3d), 3):
+        x = keypoints_list_3d[i]
+        y = keypoints_list_3d[i + 1]
+        v = keypoints_list_3d[i + 2]
         if v > 0 and x > 1 and y > 1:
             valid_x.append(x)
             valid_y.append(y)
 
-    # 如果没有有效点 (极少见)，返回 None
     if not valid_x or not valid_y:
         return None
 
@@ -64,28 +54,19 @@ def recalculate_bbox(keypoints_list, img_w, img_h, padding_ratio=1.25):
 
     width = max_x - min_x
     height = max_y - min_y
-
-    # 计算中心点
     cx = (min_x + max_x) / 2.0
     cy = (min_y + max_y) / 2.0
 
-    # 扩张
     new_width = width * padding_ratio
     new_height = height * padding_ratio
-
-    # 计算新的左上角
     new_x = cx - new_width / 2.0
     new_y = cy - new_height / 2.0
 
-    # 边界截断 (Clip to image boundaries)
     new_x = max(0, new_x)
     new_y = max(0, new_y)
 
-    # 防止右下角越界
-    if new_x + new_width > img_w:
-        new_width = img_w - new_x
-    if new_y + new_height > img_h:
-        new_height = img_h - new_y
+    if new_x + new_width > img_w: new_width = img_w - new_x
+    if new_y + new_height > img_h: new_height = img_h - new_y
 
     return [new_x, new_y, new_width, new_height]
 
@@ -116,18 +97,10 @@ def convert_json(input_path, output_path):
         "L-Knee-Res-Above", "R-Knee-Res-Above",
         "L-Knee-Res-Below", "R-Knee-Res-Below"
     ]
-
-    # 【修复】完整填入骨架列表，防止可视化报错
-    coco_skeleton = [
-        [16, 14], [14, 12], [17, 15], [15, 13],
-        [12, 13], [6, 12], [7, 13], [6, 7],
-        [6, 8], [7, 9], [8, 10], [9, 11],
-        [2, 3], [1, 2], [1, 3], [2, 4], [3, 5], [4, 6], [5, 7]
-    ]
-    ld_skeleton = [
-        [6, 18], [7, 19], [8, 20], [9, 21],
-        [12, 22], [13, 23], [14, 24], [15, 25]
-    ]
+    # 仅用于可视化连线
+    coco_skeleton = [[16, 14], [14, 12], [17, 15], [15, 13], [12, 13], [6, 12], [7, 13], [6, 7], [6, 8], [7, 9],
+                     [8, 10], [9, 11], [2, 3], [1, 2], [1, 3], [2, 4], [3, 5], [4, 6], [5, 7]]
+    ld_skeleton = [[6, 18], [7, 19], [8, 20], [9, 21], [12, 22], [13, 23], [14, 24], [15, 25]]
 
     new_cat = {
         "id": 1,
@@ -151,61 +124,93 @@ def convert_json(input_path, output_path):
     for ann in data.get("annotations", []):
         if ann["image_id"] not in valid_image_ids: continue
 
+        # =======================================================
+        # Step A: 分段初始化 (核心修正)
+        # =======================================================
         final_kps_list = []
+        # 0-16 (标准人体点): 默认 Normal (0) -> 兼容普通人的遮挡情况
         for _ in range(17):
             final_kps_list.append([0, 0, 0, 0])
-
+            # 17-24 (残肢点): 默认 Missing (2) -> 兼容普通人没有残肢
         for _ in range(TOTAL_KPS - 17):
             final_kps_list.append([0, 0, 0, 2])
 
-        # Step A: 填入原始 COCO 数据
+        # =======================================================
+        # Step B: 填入数据
+        # =======================================================
+
+        # 1. 填入原始 COCO 数据
         old_kps = ann.get("keypoints", [])
         for i in range(17):
             if i * 3 + 2 < len(old_kps):
                 x, y, v = old_kps[i * 3], old_kps[i * 3 + 1], old_kps[i * 3 + 2]
                 if v > 0:
-                    final_kps_list[i] = [x, y, v, 0]  # 默认为 Human (0)
+                    final_kps_list[i] = [x, y, v, 0]  # Normal
 
         new_kps_dict = ann.get("new_keypoints", {})
 
-        # Step B-1: 填入工具标注的点
+        # 2. 填入工具标注的点 (假肢/残肢)
         for tid_str, val in new_kps_dict.items():
             tid = int(tid_str)
-            if not isinstance(val, list) or len(val) < 3:
-                raise ValueError("invalid value of id: {}, {}".format(tid_str, val))
+            if not isinstance(val, list) or len(val) < 3: continue
 
             raw_x, raw_y, raw_vis = val[0], val[1], val[2]
-
             target_idx = -1
             point_type = 2
 
             if tid in RESIDUAL_TO_INDEX_MAP:
                 target_idx = RESIDUAL_TO_INDEX_MAP[tid]
-                point_type = 0  # 残肢 (Exist)
+                point_type = 0  # 残肢 (Normal/Exist)
             elif tid in PROSTHETIC_TO_COCO_MAP:
                 target_idx = PROSTHETIC_TO_COCO_MAP[tid]
-                point_type = 1  # 假肢 (Exist)
+                point_type = 1  # 假肢 (Prosthetic)
 
             if target_idx != -1 and raw_x != -1:
                 final_kps_list[target_idx] = [raw_x, raw_y, raw_vis, point_type]
 
-        # Step B-2: 处理 Skip 逻辑
+        # 3. 处理 Skip 逻辑 (显式 Missing)
         for ctrl_id, target_coco_idx in SKIP_CONTROL_MAP.items():
             ctrl_id_str = str(ctrl_id)
             if ctrl_id_str in new_kps_dict:
                 val = new_kps_dict[ctrl_id_str]
                 if len(val) > 4 and val[4] is True:
-                    # Skip: 坐标归零，Vis=2 (Visible)，Type=2 (Not Exists)
-                    final_kps_list[target_coco_idx] = [0, 0, 2, 2]
+                    final_kps_list[target_coco_idx] = [0, 0, 2, 2]  # 强制 Missing
 
-        # Step C: 展平
+        # =======================================================
+        # Step C: 解剖抑制 (安全版) - 解决图外假肢问题
+        # =======================================================
+        for res_idx, target_joints in ANATOMICAL_SUPPRESSION_MAP.items():
+            if res_idx >= len(final_kps_list): continue
+
+            res_node = final_kps_list[res_idx]
+            res_vis = res_node[2]
+            res_type = res_node[3]
+
+            # 只有当残肢确实存在且可见时
+            if res_vis > 0 and res_type != 2:
+                for joint_idx in target_joints:
+                    current_joint = final_kps_list[joint_idx]
+                    current_type = current_joint[3]
+
+                    # 【核心保护逻辑】
+                    # 如果下游是默认初始化的 Normal(0)，说明没标/看不见 -> 改为 Missing(2)
+                    # 如果下游已经是 Prosthetic(1)，说明你特意标了 -> 不动它！
+                    if current_type == 0:
+                        final_kps_list[joint_idx] = [0, 0, 0, 2]
+
+        # =======================================================
+        # Step D: 拆分展平 (适配 MMPose)
+        # =======================================================
         flat_kps_3d = []
         final_types = []
         num_valid_coco = 0
+
         for item in final_kps_list:
             x, y, vis, point_type = item
+
             flat_kps_3d.extend([x, y, vis])
-            final_types.append(point_type)
+            final_types.append(point_type)  # 【必须有这行】
+
             if vis > 0:
                 num_valid_coco += 1
 
@@ -214,28 +219,24 @@ def convert_json(input_path, output_path):
         new_ann["keypoint_types"] = final_types
         new_ann["num_keypoints"] = num_valid_coco
 
-        # --- Step D: BBox 重算 ---
-        # 【修复】直接获取，避免 .get() 返回 None 导致解包错误
-        # 之前的逻辑保证了 valid_image_ids 存在，所以 img_dims 必有 key
-        img_w, img_h = img_dims[ann['image_id']]
+        # BBox 重算
+        img_w, img_h = img_dims.get(ann['image_id'], (0, 0))
+        if img_w > 0:
+            new_bbox = recalculate_bbox(flat_kps_3d, img_w, img_h, padding_ratio=1.25)
+            if new_bbox:
+                new_ann['bbox'] = new_bbox
+                new_ann['area'] = new_bbox[2] * new_bbox[3]
 
-        if img_w <= 0 or img_h <= 0:
-            raise ValueError(f"Invalid image dimensions for Image ID {ann['image_id']}: ({img_w}, {img_h})")
-
-        new_bbox = recalculate_bbox(flat_kps_3d, img_w, img_h, padding_ratio=1.25)
-
-        if new_bbox:
-            new_ann['bbox'] = new_bbox
-            new_ann['area'] = new_bbox[2] * new_bbox[3]
-
-        # if "new_keypoints" in new_ann: del new_ann["new_keypoints"]
+        if "new_keypoints" in new_ann: del new_ann["new_keypoints"]
         new_data["annotations"].append(new_ann)
 
-    # --- 4. Save ---
     print(f"Output: {output_path}")
     with open(output_path, 'w', encoding='utf-8') as f:
         json.dump(new_data, f, ensure_ascii=False)
 
 
 if __name__ == "__main__":
-    convert_json("labels_train_round2.json", "train_annotations_merged.json")
+    # 替换为你实际的文件名
+    convert_json("labels_train_round2.json", "labels_train_final.json")
+    convert_json("labels_val_round2.json", "labels_val_final.json")
+    convert_json("labels_test_round2.json", "labels_test_final.json")
