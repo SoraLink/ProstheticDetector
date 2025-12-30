@@ -42,7 +42,7 @@ def recalculate_bbox(keypoints_list, img_w, img_h, padding_ratio=1.25):
     valid_y = []
 
     # 遍历所有点 (步长为4)
-    for i in range(0, len(keypoints_list), 4):
+    for i in range(0, len(keypoints_list), 3):
         x = keypoints_list[i]
         y = keypoints_list[i + 1]
         v = keypoints_list[i + 2]
@@ -194,15 +194,20 @@ def convert_json(input_path, output_path):
                     final_kps_list[target_coco_idx] = [0, 0, 2, 2]
 
         # Step C: 展平
-        flat_kps = []
-        num_valid = 0
+        flat_kps_3d = []
+        final_types = []
+        num_valid_coco = 0
         for item in final_kps_list:
-            flat_kps.extend(item)
-            if item[2] > 0: num_valid += 1
+            x, y, vis, point_type = item
+            flat_kps_3d.extend([x, y, vis])
+            final_types.append(point_type)
+            if vis > 0:
+                num_valid_coco += 1
 
         new_ann = ann.copy()
-        new_ann["keypoints"] = flat_kps
-        new_ann["num_keypoints"] = num_valid
+        new_ann["keypoints"] = flat_kps_3d
+        new_ann["keypoint_types"] = final_types
+        new_ann["num_keypoints"] = num_valid_coco
 
         # --- Step D: BBox 重算 ---
         # 【修复】直接获取，避免 .get() 返回 None 导致解包错误
@@ -212,7 +217,7 @@ def convert_json(input_path, output_path):
         if img_w <= 0 or img_h <= 0:
             raise ValueError(f"Invalid image dimensions for Image ID {ann['image_id']}: ({img_w}, {img_h})")
 
-        new_bbox = recalculate_bbox(flat_kps, img_w, img_h, padding_ratio=1.25)
+        new_bbox = recalculate_bbox(flat_kps_3d, img_w, img_h, padding_ratio=1.25)
 
         if new_bbox:
             new_ann['bbox'] = new_bbox
