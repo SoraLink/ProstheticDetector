@@ -12,16 +12,13 @@ from PIL import Image, ImageTk, ImageDraw, ImageOps
 # ==========================================
 #              GLOBAL SETTINGS
 # ==========================================
-# [开关] 设置为 False 将彻底隐藏按钮、禁用启动/退出时的弹窗和上传功能
 ENABLE_CLOUD_SYNC = False
 # ==========================================
 
 try:
     from huggingface_hub import upload_file, hf_hub_download
 
-    # 逻辑：只有当库存在 且 全局开关打开时，才视为云功能可用
     HF_AVAILABLE = True if ENABLE_CLOUD_SYNC else False
-
 except ImportError:
     HF_AVAILABLE = False
     if ENABLE_CLOUD_SYNC:
@@ -29,12 +26,7 @@ except ImportError:
 
 
 class Config:
-    """
-    Config class. Set window size, keypoint name and colors for anaotation display
-    """
-    # 配置你的 Hugging Face 仓库 ID
     HF_REPO_ID = "Soralink/LDPoseP"
-
     WINDOW_WIDTH = 1400
     WINDOW_HEIGHT = 900
 
@@ -102,8 +94,6 @@ class DataManager:
         self.ld_data_map = {}
         self.saved_anns_map = defaultdict(list)
         self.finished_ids = set()
-
-        # [优化] 新增内存缓存和线程锁
         self.output_cache = {"images": [], "annotations": []}
         self.write_lock = threading.Lock()
         self.save_thread = None
@@ -114,7 +104,6 @@ class DataManager:
         self.image_dir = img_dir
 
     def load_data(self):
-        # 1. 加载原始标注 (只读)
         ld_anns, ld_imgs = self._load_json(self.ld_label_path)
         if not ld_imgs: return False
 
@@ -128,13 +117,10 @@ class DataManager:
                 self.ld_data_map[img_id] = (img, temp_ld_anns[img_id])
         self.all_image_ids = sorted(list(self.ld_data_map.keys()))
 
-        # 2. [优化] 加载输出文件到内存缓存 self.output_cache
-        # 注意：这里读取的是整个文件的结构，不仅仅是列表
         if self.output_label_path and self.output_label_path.exists():
             try:
                 with open(self.output_label_path, "r", encoding="utf-8") as f:
                     data = json.load(f)
-                    # 确保结构完整
                     if not isinstance(data, dict): data = {"images": [], "annotations": []}
                     self.output_cache = data
             except Exception:
@@ -142,7 +128,6 @@ class DataManager:
         else:
             self.output_cache = {"images": [], "annotations": []}
 
-        # 3. 构建快速查找表
         self.saved_anns_map = defaultdict(list)
         for ann in self.output_cache.get("annotations", []):
             self.saved_anns_map[ann['image_id']].append(ann)
@@ -181,19 +166,11 @@ class DataManager:
         }
 
     def save_annotation_result(self, current_id, current_labels_map, sync=False):
-        """
-        sync: 如果为 True，则强制同步写入（用于程序关闭时），否则异步写入。
-        """
-        # [优化] 直接操作内存中的 self.output_cache，不再读取文件
         images = self.output_cache.get("images", [])
         annotations = self.output_cache.get("annotations", [])
-
-        # 1. 在内存中移除旧的当前图片数据
-        # (这里用列表推导式虽然是 O(N)，但在内存中比 IO 快几个数量级)
         images = [img for img in images if img['id'] != current_id]
         annotations = [ann for ann in annotations if ann['image_id'] != current_id]
 
-        # 2. 准备新数据
         img_info, ld_anns = self.ld_data_map[current_id]
         has_valid_data = False
         for person_labels in current_labels_map.values():
@@ -225,42 +202,28 @@ class DataManager:
                 annotations.append(out_ann)
                 new_saved_cache.append(out_ann)
 
-        # 3. 更新内存缓存 (保持不变)
         self.output_cache["images"] = images
         self.output_cache["annotations"] = annotations
-
-        # 更新快速查找表 (保持不变)
         self.finished_ids.add(current_id)
         self.saved_anns_map[current_id] = new_saved_cache
 
-        # 4. 【修改这里】线程控制逻辑
         if sync:
-            # 如果是同步（比如关闭程序时），必须强制写，且要等待旧线程结束
             if self.save_thread and self.save_thread.is_alive():
                 self.save_thread.join()
             self._write_to_disk()
         else:
-            # 【核心修改】：如果当前已经有一个保存线程在跑，就直接 return，不排队了
-            # 因为内存里的 self.output_cache 已经是最新的了，下次保存自然会带上这次的修改
             if self.save_thread and self.save_thread.is_alive():
-                # print("后台忙，本次跳过硬盘写入（内存已更新）") # 调试用
                 return len(self.finished_ids)
-
-            # 如果没有线程在跑，才启动一个新的
             self.save_thread = threading.Thread(target=self._write_to_disk)
             self.save_thread.daemon = True
             self.save_thread.start()
-
         return len(self.finished_ids)
 
     def _write_to_disk(self):
-        """实际的写入操作，加锁防止冲突"""
         with self.write_lock:
             try:
-                # 为了防止写入一半程序崩溃导致文件损坏，建议先写临时文件再 rename
-                # 但为了代码简单，这里先直接写（因为 json.dump 比较快）
                 with open(self.output_label_path, "w", encoding="utf-8") as f:
-                    json.dump(self.output_cache, f, ensure_ascii=False, indent=None)  # indent=None 可以减小文件体积并加快写入
+                    json.dump(self.output_cache, f, ensure_ascii=False, indent=None)
             except Exception as e:
                 print(f"Error saving to disk: {e}")
 
@@ -268,10 +231,7 @@ class DataManager:
 class ImageVisualizer:
     def render(self, base_img, ld_anns, selected_ann_index, current_labels_map, show_coco_kps=True,
                show_extra_kps=False, show_bbox=True, show_connections=True, scale=1.0):
-        if base_img is None:
-            return None
-
-            # [关键优化] 直接在内存中复制一份底图，极快
+        if base_img is None: return None
         img = base_img.copy()
         draw = ImageDraw.Draw(img)
 
@@ -280,10 +240,8 @@ class ImageVisualizer:
 
         if ld_anns and 0 <= selected_ann_index < len(ld_anns):
             target_ann = ld_anns[selected_ann_index]
-            if show_coco_kps:
-                self._draw_coco_keypoints(draw, target_ann, to_screen)
-            if show_extra_kps:
-                self._draw_extra_keypoints(draw, target_ann, to_screen)
+            if show_coco_kps: self._draw_coco_keypoints(draw, target_ann, to_screen)
+            if show_extra_kps: self._draw_extra_keypoints(draw, target_ann, to_screen)
             if show_bbox and "bbox" in target_ann:
                 x, y, w, h = target_ann["bbox"]
                 sx, sy, sw, sh = to_screen(x), to_screen(y), to_screen(w), to_screen(h)
@@ -291,35 +249,25 @@ class ImageVisualizer:
                 draw.text((sx, sy - 15), f"ID: {target_ann.get('id')}", fill="red")
 
         current_person_labels = current_labels_map.get(selected_ann_index, {})
-
-        if show_connections:
-            self._draw_prosthetic_connections(draw, current_person_labels, to_screen)
+        if show_connections: self._draw_prosthetic_connections(draw, current_person_labels, to_screen)
 
         r = 4
         for key_id, val in current_person_labels.items():
             if not isinstance(val, (list, tuple)) or len(val) < 2: continue
             if val[0] == -1: continue
-
             raw_x, raw_y = val[0], val[1]
-            kx = to_screen(raw_x)
-            ky = to_screen(raw_y)
-
+            kx, ky = to_screen(raw_x), to_screen(raw_y)
             kv = val[2] if len(val) > 2 else -1
             flex = val[3] if len(val) > 3 else -1
             is_skip = val[4] if len(val) > 4 else False
-
             color = Config.COLORS.get(key_id, 'white')
             draw.ellipse([kx - r, ky - r, kx + r, ky + r], fill=color, outline='black', width=1)
-
             label_text = str(kv)
             if key_id in Config.PROSTHETIC_IDS:
                 f_str = "Fix" if flex == 0 else "Free" if flex == 1 else "?"
                 if flex != -1: label_text += f"\n{f_str}"
-            if is_skip:
-                label_text += "\n[S]"
-
+            if is_skip: label_text += "\n[S]"
             draw.text((kx + r + 2, ky - r), label_text, fill=color, stroke_fill="black", stroke_width=1)
-
         return ImageTk.PhotoImage(img)
 
     def _draw_prosthetic_connections(self, draw, labels_map, to_screen_func):
@@ -391,27 +339,19 @@ class ProsthesisLabelerApp:
         self.selected_keypoint_id = -1
         self.runtime_labels = {}
         self.scale = 1.0
-
         self.raw_image = None
         self.display_image = None
 
-        # View States
         self.show_coco_var = tk.BooleanVar(value=False)
         self.show_extra_var = tk.BooleanVar(value=False)
         self.show_bbox_var = tk.BooleanVar(value=True)
         self.show_connection_var = tk.BooleanVar(value=True)
 
-        # 1. 先让用户选择路径
         if not self._init_paths():
             self.master.destroy()
             return
-
-        # [NEW] 2. 路径选好后，立刻询问是否从云端下载并覆盖
-        # 如果 HF_AVAILABLE 为 False (由于未安装或 GLOBAL 变量关闭)，这里不会执行
         if HF_AVAILABLE:
             self._sync_from_cloud_on_startup()
-
-        # 3. 无论是否下载，现在加载（可能是新的，也可能是旧的）数据
         if not self.data_manager.load_data():
             messagebox.showerror("Error", "Unable to load data files.")
             self.master.destroy()
@@ -420,140 +360,88 @@ class ProsthesisLabelerApp:
         self.current_img_index = self.data_manager.get_next_todo_index()
         self._setup_ui()
 
-        # === 快捷键绑定区 ===
         self.master.bind("w", lambda event: self._move_list_selection(-1))
         self.master.bind("s", lambda event: self._move_list_selection(1))
         self.master.bind("a", lambda event: self._prev_image())
         self.master.bind("d", lambda event: self._next_image())
-
         self.master.protocol("WM_DELETE_WINDOW", self._on_close_window)
-
         self.master.after(100, self._load_current_image)
 
-    # [NEW] 启动时同步逻辑 (修改：动态文件名)
     def _sync_from_cloud_on_startup(self):
-        # 再次检查，虽然 __init__ 已经 check 过了，为了代码独立性保留
-        if not HF_AVAILABLE:
-            return
-
-        # 获取当前选择的文件名，例如 "train.json"
+        if not HF_AVAILABLE: return
         target_filename = self.data_manager.output_label_path.name
-
-        # 弹窗询问，避免误覆盖
         msg = f"Do you want to download the latest '{target_filename}' from Hugging Face?\n\nRepo: {Config.HF_REPO_ID}\n\nWARNING: This will OVERWRITE your local file:\n{self.data_manager.output_label_path}"
-        if not messagebox.askyesno("Cloud Sync Check", msg):
-            return
-
+        if not messagebox.askyesno("Cloud Sync Check", msg): return
         try:
-            # 创建个临时的提示窗，因为下载可能会卡几秒
             loading_win = tk.Toplevel(self.master)
             loading_win.title("Downloading...")
             loading_win.geometry("300x100")
-            tk.Label(loading_win, text=f"Downloading {target_filename} from Cloud...\nPlease wait.", pady=20).pack()
+            tk.Label(loading_win, text=f"Downloading {target_filename}...\nPlease wait.", pady=20).pack()
             self.master.update()
-
-            # 1. 下载到 HF 缓存目录 (注意 filename 必须与 repo 中一致)
-            print(f"Downloading {target_filename} from Hugging Face...")
-            cached_file_path = hf_hub_download(
-                repo_id=Config.HF_REPO_ID,
-                filename=target_filename,  # [MODIFIED] 使用动态文件名
-                repo_type="dataset"
-            )
-
-            # 2. 复制并覆盖用户指定的本地路径
-            target_path = self.data_manager.output_label_path
-            shutil.copy(cached_file_path, target_path)
-
+            cached_file_path = hf_hub_download(repo_id=Config.HF_REPO_ID, filename=target_filename, repo_type="dataset")
+            shutil.copy(cached_file_path, self.data_manager.output_label_path)
             loading_win.destroy()
             messagebox.showinfo("Success", f"Synced {target_filename} successfully! Loading latest data...")
-
         except Exception as e:
-            messagebox.showerror("Sync Error",
-                                 f"Failed to download from Cloud:\n{e}\n\nMaybe the file '{target_filename}' does not exist in the repo yet?\nLoading local file instead.")
+            messagebox.showerror("Sync Error", f"Failed to download:\n{e}\n\nLoading local file instead.")
 
-    # 实际执行上传任务的函数 (运行在后台线程) (修改：动态文件名)
     def _upload_to_hf(self):
         if not HF_AVAILABLE:
             self.master.after(0, lambda: messagebox.showerror("Error", "Cloud features disabled."))
             return
-        if not self.data_manager.output_label_path:
-            return
-
+        if not self.data_manager.output_label_path: return
         try:
             self.master.after(0, lambda: self.info_var.set("Syncing to Cloud... (Do not close)"))
-
-            # 获取当前文件名
             target_filename = self.data_manager.output_label_path.name
-
-            print(f"Starting upload of {target_filename} to Hugging Face...")
             upload_file(
                 path_or_fileobj=str(self.data_manager.output_label_path),
-                path_in_repo=target_filename,  # [MODIFIED] 上传为同名文件
+                path_in_repo=target_filename,
                 repo_id=Config.HF_REPO_ID,
                 repo_type="dataset",
                 commit_message=f"Sync {target_filename}: {self.counter_var.get()}"
             )
-            print("Upload success.")
-
-            self.master.after(0, lambda: messagebox.showinfo("Success",
-                                                             f"Upload of {target_filename} to Hugging Face Completed!"))
+            self.master.after(0, lambda: messagebox.showinfo("Success", f"Upload of {target_filename} Completed!"))
             self.master.after(0, lambda: self.info_var.set(f"Sync Complete (Last saved: {self.counter_var.get()})"))
-
         except Exception as e:
             print(f"Upload failed: {e}")
             self.master.after(0, lambda: messagebox.showerror("Error", f"Upload Failed: {e}"))
             self.master.after(0, lambda: self.info_var.set("Sync Failed"))
 
     def _start_upload_thread(self):
-        if not self._save_current(sync=True):
-            return
+        if not self._save_current(sync=True): return
         t = threading.Thread(target=self._upload_to_hf)
         t.daemon = True
         t.start()
 
-    # (修改：动态文件名)
     def _on_close_window(self):
         self._save_current(sync=True)
-
-        # 只有在 HF 功能开启时才询问上传
-        if HF_AVAILABLE:
-            if messagebox.askyesno("Exit", "Do you want to upload data to Hugging Face before exiting?"):
-                try:
-                    self.info_var.set("Uploading... Please wait...")
-                    self.master.update()
-
-                    # 获取文件名
-                    target_filename = self.data_manager.output_label_path.name
-
-                    upload_file(
-                        path_or_fileobj=str(self.data_manager.output_label_path),
-                        path_in_repo=target_filename,  # [MODIFIED]
-                        repo_id=Config.HF_REPO_ID,
-                        repo_type="dataset",
-                        commit_message=f"Final sync of {target_filename} on exit"
-                    )
-                    print("Final upload successfully.")
-                except Exception as e:
-                    messagebox.showerror("Error", f"Upload failed: {e}")
-
+        if HF_AVAILABLE and messagebox.askyesno("Exit", "Upload data to Hugging Face before exiting?"):
+            try:
+                self.info_var.set("Uploading... Please wait...")
+                self.master.update()
+                target_filename = self.data_manager.output_label_path.name
+                upload_file(
+                    path_or_fileobj=str(self.data_manager.output_label_path),
+                    path_in_repo=target_filename,
+                    repo_id=Config.HF_REPO_ID,
+                    repo_type="dataset",
+                    commit_message=f"Final sync of {target_filename} on exit"
+                )
+            except Exception as e:
+                messagebox.showerror("Error", f"Upload failed: {e}")
         self.master.destroy()
 
     def _init_paths(self):
         ld_path = filedialog.askopenfilename(title="Select LDPose annotation (.json)", filetypes=[("JSON", "*.json")],
                                              initialdir='./ldpose_final/annotations')
         if not ld_path: return False
-
-        # 用户在这里输入保存的文件名，比如 train.json, test.json
         out_path = filedialog.asksaveasfilename(title="Save Label File location", initialfile="labels.json",
                                                 defaultextension=".json", initialdir='./')
         if not out_path: return False
         img_dir = filedialog.askdirectory(title="Select Image Directory", initialdir='./ldpose_final')
         if not img_dir: return False
-
         if not Path(out_path).exists():
             with open(out_path, "w", encoding="utf-8") as f: json.dump({"images": [], "annotations": []}, f)
-
-        # 将路径转为 Path 对象传入 DataManager
         self.data_manager.set_paths(Path(ld_path), Path(out_path), Path(img_dir))
         return True
 
@@ -602,10 +490,8 @@ class ProsthesisLabelerApp:
         h_scroll.pack(side=tk.BOTTOM, fill=tk.X)
         self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self.canvas.configure(yscrollcommand=v_scroll.set, xscrollcommand=h_scroll.set)
-
         self.image_label = tk.Label(self.canvas, bd=0, highlightthickness=0)
         self.canvas_window = self.canvas.create_window((0, 0), window=self.image_label, anchor="nw")
-
         self.image_label.bind("<Button-1>", self._on_canvas_click)
         self.image_label.bind('<Enter>', self._bound_to_mousewheel)
         self.canvas.bind('<Enter>', self._bound_to_mousewheel)
@@ -628,7 +514,6 @@ class ProsthesisLabelerApp:
         state = event.state
         alt_pressed = (state & 8) or (state & 0x20000)
         ctrl_pressed = (state & 4)
-
         if alt_pressed or ctrl_pressed:
             if event.num == 4 or event.delta > 0:
                 self._zoom_image(1.1)
@@ -687,18 +572,12 @@ class ProsthesisLabelerApp:
                                                                                                     padx=2)
 
         self.skip_joint_var = tk.BooleanVar(value=False)
-        self.chk_skip_joint = tk.Checkbutton(
-            attr_frame,
-            text="Skip Knee/Elbow",
-            variable=self.skip_joint_var,
-            command=self._on_skip_toggle,
-            fg="red", font=("Arial", 9, "bold")
-        )
+        self.chk_skip_joint = tk.Checkbutton(attr_frame, text="Skip Knee/Elbow", variable=self.skip_joint_var,
+                                             command=self._on_skip_toggle, fg="red", font=("Arial", 9, "bold"))
         tk.Button(attr_frame, text="Clear", bg="#ffcccc", command=self._clear_current_point).pack(side=tk.RIGHT, padx=5)
 
         toggle_frame = tk.Frame(tools_panel)
         toggle_frame.pack(fill=tk.X, pady=5)
-
         row1 = tk.Frame(toggle_frame)
         row1.pack(fill=tk.X, expand=True)
         self.btn_toggle_coco = tk.Button(row1, text="显示原始 COCO", command=self._toggle_coco_display)
@@ -716,13 +595,23 @@ class ProsthesisLabelerApp:
         self.btn_toggle_conn.pack(side=tk.LEFT, padx=2, expand=True, fill=tk.X)
         self.default_btn_bg = self.btn_toggle_coco.cget("bg")
 
+        # ================= NEW: SEARCH BOX =================
         search_frame = tk.Frame(tools_panel)
         search_frame.pack(fill=tk.X, pady=5)
-        tk.Label(search_frame, text="跳转 Index:", font=("Arial", 10)).pack(side=tk.LEFT)
+        tk.Label(search_frame, text="跳转:", font=("Arial", 10)).pack(side=tk.LEFT)
+
+        # 新增输入框
         self.entry_search = tk.Entry(search_frame, width=8, font=("Arial", 10))
         self.entry_search.pack(side=tk.LEFT, padx=5)
         self.entry_search.bind("<Return>", self._on_search_index)
-        tk.Button(search_frame, text="Go", command=self._on_search_index, height=1).pack(side=tk.LEFT)
+
+        tk.Button(search_frame, text="Go", command=self._on_search_index, height=1).pack(side=tk.LEFT, padx=2)
+
+        # 新增单选按钮切换搜索模式
+        self.search_mode_var = tk.IntVar(value=0)  # 0 for Index, 1 for Image ID
+        tk.Radiobutton(search_frame, text="Index", variable=self.search_mode_var, value=0).pack(side=tk.LEFT, padx=5)
+        tk.Radiobutton(search_frame, text="ImgID", variable=self.search_mode_var, value=1).pack(side=tk.LEFT)
+        # ===================================================
 
         nav_frame = tk.Frame(tools_panel)
         nav_frame.pack(fill=tk.X, pady=5)
@@ -732,31 +621,44 @@ class ProsthesisLabelerApp:
                                                                                                    fill=tk.X,
                                                                                                    expand=True, padx=20)
 
-        # [NEW] Cloud Sync Button
-        # 只有在 HF 功能可用时才显示按钮
         if HF_AVAILABLE:
             sync_frame = tk.Frame(tools_panel)
             sync_frame.pack(fill=tk.X, pady=10)
-            self.btn_upload = tk.Button(
-                sync_frame,
-                text="☁️ Sync to HuggingFace",
-                bg="#007bff", fg="white", font=("Arial", 10, "bold"),
-                command=self._start_upload_thread
-            )
+            self.btn_upload = tk.Button(sync_frame, text="☁️ Sync to HuggingFace", bg="#007bff", fg="white",
+                                        font=("Arial", 10, "bold"), command=self._start_upload_thread)
             self.btn_upload.pack(fill=tk.X, ipady=5)
 
     def _on_search_index(self, event=None):
-        val = self.entry_search.get().strip()
-        if not val: return
-        try:
-            target_idx = int(val) - 1
-        except ValueError:
-            messagebox.showerror("Error", "请输入有效的数字 (Index)")
-            return
+        val_str = self.entry_search.get().strip()
+        if not val_str: return
+
+        target_idx = -1
         total_imgs = len(self.data_manager.all_image_ids)
+        mode = self.search_mode_var.get()
+
+        if mode == 0:  # Mode: By Index
+            try:
+                target_idx = int(val_str) - 1
+            except ValueError:
+                messagebox.showerror("Error", "请输入有效的数字索引")
+                return
+        else:  # Mode: By Image ID
+            try:
+                target_id = int(val_str)
+                # 查找这个ID对应的索引
+                if target_id in self.data_manager.all_image_ids:
+                    target_idx = self.data_manager.all_image_ids.index(target_id)
+                else:
+                    messagebox.showerror("Error", f"未找到 Image ID: {target_id}")
+                    return
+            except ValueError:
+                messagebox.showerror("Error", "Image ID 必须是数字")
+                return
+
         if target_idx < 0 or target_idx >= total_imgs:
             messagebox.showerror("Error", f"索引超出范围。\n有效范围: 1 - {total_imgs}")
             return
+
         if not self._save_current(): return
         self.current_img_index = target_idx
         self._load_current_image()
@@ -825,7 +727,6 @@ class ProsthesisLabelerApp:
         self.selected_ann_index = 0
         self._reconstruct_runtime_state(ctx)
 
-        # 更新列表 UI
         self.ann_listbox.delete(0, tk.END)
         ld_anns = ctx['ld_anns']
         if ld_anns:
@@ -840,12 +741,9 @@ class ProsthesisLabelerApp:
         self.info_var.set(f"{ctx['index_str']} : {rel_path}")
         self._update_counter()
 
-        # [关键优化] 在这里加载原始大图，只加载一次！
         try:
             self.raw_image = Image.open(ctx['full_path']).convert("RGB")
             self.raw_image = ImageOps.exif_transpose(self.raw_image)
-
-            # 计算初始缩放比例
             img_w, img_h = self.raw_image.size
             canvas_w = self.canvas.winfo_width()
             canvas_h = self.canvas.winfo_height()
@@ -854,22 +752,17 @@ class ProsthesisLabelerApp:
             scale_w = canvas_w / img_w
             scale_h = canvas_h / img_h
             self.scale = min(scale_w, scale_h, 1.0)
-
-            # 生成初始的 display_image 缓存
             self._update_display_image_cache()
-
         except Exception as e:
             print(f"Error loading image: {e}")
             self.raw_image = None
             self.display_image = None
-
         self._refresh_canvas()
 
     def _update_display_image_cache(self):
         if self.raw_image is None: return
         new_w = int(self.raw_image.width * self.scale)
         new_h = int(self.raw_image.height * self.scale)
-        # 这一步比较耗时，所以只在 切图 或 缩放 时调用
         self.display_image = self.raw_image.resize((new_w, new_h), Image.Resampling.LANCZOS)
 
     def _reconstruct_runtime_state(self, ctx):
@@ -913,12 +806,8 @@ class ProsthesisLabelerApp:
     def _prune_garbage(self):
         for ann_idx in list(self.runtime_labels.keys()):
             person_labels = self.runtime_labels[ann_idx]
-            keys_to_delete = [
-                k for k, v in person_labels.items()
-                if isinstance(v, list) and len(v) > 0 and v[0] == -1
-            ]
-            for k in keys_to_delete:
-                del person_labels[k]
+            keys_to_delete = [k for k, v in person_labels.items() if isinstance(v, list) and len(v) > 0 and v[0] == -1]
+            for k in keys_to_delete: del person_labels[k]
 
     def _validate_before_save(self):
         self._prune_garbage()
@@ -937,11 +826,10 @@ class ProsthesisLabelerApp:
                         return False
         return True
 
-    def _save_current(self, sync=False):  # 增加 sync 参数
+    def _save_current(self, sync=False):
         if not self._validate_before_save(): return False
         ctx = self.data_manager.get_image_context(self.current_img_index)
         if not ctx: return True
-        # 传递 sync 给 DataManager
         count = self.data_manager.save_annotation_result(ctx['id'], self.runtime_labels, sync=sync)
         self._update_counter(saved_count=count)
         return True
@@ -966,14 +854,11 @@ class ProsthesisLabelerApp:
             return
         if self.selected_ann_index not in self.runtime_labels:
             self.runtime_labels[self.selected_ann_index] = defaultdict(lambda: [-1, -1, -1, -1, False])
-
         current_points = self.runtime_labels[self.selected_ann_index]
         if self.selected_keypoint_id not in current_points:
             current_points[self.selected_keypoint_id] = [-1, -1, -1, -1, False]
-
         real_x = int(event.x / self.scale)
         real_y = int(event.y / self.scale)
-
         current_points[self.selected_keypoint_id][0] = real_x
         current_points[self.selected_keypoint_id][1] = real_y
         self._refresh_canvas()
