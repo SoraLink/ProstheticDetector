@@ -53,28 +53,38 @@ def recalculate_bbox(keypoints_list_3d, img_w, img_h, padding_ratio=1.25):
             valid_y.append(y)
 
     if not valid_x or not valid_y:
-        return None
+        return None, 0.0
 
     min_x, max_x = min(valid_x), max(valid_x)
     min_y, max_y = min(valid_y), max(valid_y)
 
-    width = max_x - min_x
-    height = max_y - min_y
+    raw_w = max_x - min_x
+    raw_h = max_y - min_y
+    tight_area = raw_w * raw_h
+
     cx = (min_x + max_x) / 2.0
     cy = (min_y + max_y) / 2.0
 
-    new_width = width * padding_ratio
-    new_height = height * padding_ratio
-    new_x = cx - new_width / 2.0
-    new_y = cy - new_height / 2.0
+    new_width = raw_w * padding_ratio
+    new_height = raw_h * padding_ratio
 
-    new_x = max(0, new_x)
-    new_y = max(0, new_y)
+    x1 = cx - new_width / 2.0
+    y1 = cy - new_height / 2.0
+    x2 = cx + new_width / 2.0
+    y2 = cy + new_height / 2.0
 
-    if new_x + new_width > img_w: new_width = img_w - new_x
-    if new_y + new_height > img_h: new_height = img_h - new_y
+    x1 = max(0, min(x1, img_w))
+    y1 = max(0, min(y1, img_h))
+    x2 = max(0, min(x2, img_w))
+    y2 = max(0, min(y2, img_h))
 
-    return [new_x, new_y, new_width, new_height]
+    final_w = x2 - x1
+    final_h = y2 - y1
+
+    if final_w <= 1 or final_h <= 1:
+        return None, 0.0
+
+    return [x1, y1, final_w, final_h], tight_area
 
 
 def convert_json(input_path, output_path):
@@ -130,6 +140,9 @@ def convert_json(input_path, output_path):
     for ann in data.get("annotations", []):
         if ann["image_id"] not in valid_image_ids: continue
 
+        img_w, img_h = img_dims.get(ann['image_id'], (0, 0))
+        if img_w <= 0 or img_h <= 0: continue
+
         # =======================================================
         # Step A: 分段初始化 (核心修正)
         # =======================================================
@@ -151,6 +164,9 @@ def convert_json(input_path, output_path):
             if i * 3 + 2 < len(old_kps):
                 x, y, v = old_kps[i * 3], old_kps[i * 3 + 1], old_kps[i * 3 + 2]
                 if v > 0:
+                    x = max(0, min(x, img_w - 1))
+                    y = max(0, min(y, img_h - 1))
+
                     final_kps_list[i] = [x, y, v, 0]  # Normal
 
         new_kps_dict = ann.get("new_keypoints", {})
@@ -172,7 +188,10 @@ def convert_json(input_path, output_path):
                 point_type = 1  # 假肢 (Prosthetic)
 
             if target_idx != -1 and raw_x != -1:
-                final_kps_list[target_idx] = [raw_x, raw_y, raw_vis, point_type]
+
+                safe_x = max(0, min(raw_x, img_w - 1))
+                safe_y = max(0, min(raw_y, img_h - 1))
+                final_kps_list[target_idx] = [safe_x, safe_y, raw_vis, point_type]
 
         # 3. 处理 Skip 逻辑 (显式 Missing)
         for ctrl_id, target_coco_idx in SKIP_CONTROL_MAP.items():
@@ -236,14 +255,25 @@ def convert_json(input_path, output_path):
 
         # BBox 重算
         img_w, img_h = img_dims.get(ann['image_id'], (0, 0))
-        if img_w > 0:
-            new_bbox = recalculate_bbox(flat_kps_3d, img_w, img_h, padding_ratio=1.25)
-            if new_bbox:
-                new_ann['bbox'] = new_bbox
-                new_ann['area'] = new_bbox[2] * new_bbox[3]
 
-        if "new_keypoints" in new_ann: del new_ann["new_keypoints"]
-        new_data["annotations"].append(new_ann)
+        valid_annotation = False
+
+        if img_w > 0:
+            result = recalculate_bbox(flat_kps_3d, img_w, img_h, padding_ratio=1.25)
+            if result[0] is not None:
+                new_bbox, tight_area = result
+
+                if tight_area > 0 and new_bbox[2] > 0 and new_bbox[3] > 0:
+                    new_ann['bbox'] = new_bbox
+                    new_ann['area'] = float(tight_area)
+                    valid_annotation = True
+
+        if valid_annotation:
+            if "new_keypoints" in new_ann: del new_ann["new_keypoints"]
+            new_data["annotations"].append(new_ann)
+
+        else:
+            print(f"丢弃无效数据 (Area=0): ImgID {ann['image_id']} | AnnID {ann['id']}")
 
     print(f"Output: {output_path}")
     with open(output_path, 'w', encoding='utf-8') as f:

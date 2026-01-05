@@ -1,112 +1,89 @@
 import json
 import os
+import matplotlib.pyplot as plt
+import matplotlib.patches as patches
+from PIL import Image
+import numpy as np
+
+# ================= 配置区域 =================
+# 1. 填入你的训练集 JSON 路径
+JSON_PATH = '/home/sora/workspace/dataset/ldpose_final/pros_annotations/labels_train_final.json'
+
+# 2. 填入你的图片根目录 (就是 ldpose_train 文件夹)
+IMG_ROOT = '/home/sora/workspace/dataset/ldpose_final/ldpose_train/'
+
+# 3. 想看第几张图？(换几个数字多测测，比如 10, 50, 100)
+SAMPLE_IDX = 10
 
 
-def check_keypoints_bounds(json_path):
-    print(f"\n{'=' * 20} 正在扫描: {os.path.basename(json_path)} {'=' * 20}")
+# ===========================================
 
-    if not os.path.exists(json_path):
-        print(f"❌ 文件不存在: {json_path}")
+def check_bbox():
+    print(f"🚀 正在读取 JSON: {JSON_PATH} ...")
+    with open(JSON_PATH, 'r') as f:
+        data = json.load(f)
+
+    # 获取标注和对应图片信息
+    ann = data['annotations'][SAMPLE_IDX]
+    img_id = ann['image_id']
+    bbox = ann['bbox']  # [x, y, w, h]
+
+    # 找到对应的图片文件名
+    img_info = next((item for item in data['images'] if item['id'] == img_id), None)
+    if not img_info:
+        print(f"❌ 找不到 Image ID {img_id} 的图片信息")
+        return
+
+    img_filename = img_info['file_name']
+    img_path = os.path.join(IMG_ROOT, img_filename)
+    img_w, img_h = img_info['width'], img_info['height']
+
+    print("-" * 40)
+    print(f"🔍 检查样本 ID: {SAMPLE_IDX}")
+    print(f"🖼️ 图片尺寸 (W x H): {img_w} x {img_h}")
+    print(f"📦 JSON BBox 数据: {bbox}")
+
+    # === 核心侦探逻辑 ===
+    x, y, w, h = bbox
+
+    # 1. 数值检查
+    is_xyxy_suspect = False
+    if x + w > img_w * 1.1:  # 如果 x+w 远超图片宽度
+        print(f"⚠️ [高能预警] x + w ({x + w}) > 图片宽度 ({img_w})！")
+        print("👉 极大可能是 XYXY 格式误写成了 XYWH！")
+        is_xyxy_suspect = True
+    elif w > img_w or h > img_h:
+        print(f"⚠️ [警告] 框的宽高 ({w}, {h}) 比图片本身还大！")
+
+    # 2. 可视化绘制
+    if not os.path.exists(img_path):
+        print(f"❌ 图片文件不存在: {img_path}")
         return
 
     try:
-        with open(json_path, 'r', encoding='utf-8') as f:
-            data = json.load(f)
+        im = Image.open(img_path)
     except Exception as e:
-        print(f"❌ JSON 读取失败: {e}")
+        print(f"❌ 无法打开图片: {e}")
         return
 
-    # 1. 建立图片尺寸索引 (ID -> [w, h])
-    # 因为 annotation 里只有 image_id，没有宽高，必须先查 images 列表
-    img_dims = {}
-    for img in data.get('images', []):
-        img_dims[img['id']] = (img.get('width', 0), img.get('height', 0))
+    fig, ax = plt.subplots(figsize=(10, 10))
+    ax.imshow(im)
 
-    print(f"ℹ️  已加载 {len(img_dims)} 张图片信息的尺寸。")
+    # 画框：Matplotlib 的 Rectangle 接收 (x,y), width, height
+    # 如果数据是 xyxy，这里的 w 其实是 x2，框会超级宽，画到姥姥家去
+    rect = patches.Rectangle((x, y), w, h, linewidth=3, edgecolor='r', facecolor='none')
+    ax.add_patch(rect)
 
-    # 统计数据
-    total_anns = len(data.get('annotations', []))
-    total_kps = 0
-    out_of_bound_count = 0
-    affected_anns = set()
+    # 加个标题
+    status = "SUSPECTED XYXY (WRONG)" if is_xyxy_suspect else "LOOKS LIKE XYWH (OK)"
+    ax.set_title(f"BBox Check: {status}\nBlue=Image Edge, Red=BBox", color='r' if is_xyxy_suspect else 'g')
 
-    print(f"ℹ️  开始检查 {total_anns} 条标注...\n")
-
-    # 2. 遍历标注
-    for ann in data.get('annotations', []):
-        img_id = ann['image_id']
-        ann_id = ann['id']
-
-        if img_id not in img_dims:
-            continue
-
-        img_w, img_h = img_dims[img_id]
-        keypoints = ann.get('keypoints', [])
-
-        # 3. 遍历关键点 (x, y, v)
-        for i in range(0, len(keypoints), 3):
-            # 防止列表越界
-            if i + 2 >= len(keypoints): break
-
-            x = keypoints[i]
-            y = keypoints[i + 1]
-            v = keypoints[i + 2]
-
-            # 只检查可见点 (v > 0)
-            # 如果 v=0，通常 x,y 也是 0，但不管它
-            if v > 0:
-                total_kps += 1
-                is_out = False
-                reason = []
-
-                # === 核心检查逻辑 ===
-                # 检查是否小于 0
-                if x < 0:
-                    reason.append(f"x={x:.2f} < 0")
-                    is_out = True
-                if y < 0:
-                    reason.append(f"y={y:.2f} < 0")
-                    is_out = True
-
-                # 检查是否超出宽高
-                if x > img_w:
-                    reason.append(f"x={x:.2f} > w({img_w})")
-                    is_out = True
-                if y > img_h:
-                    reason.append(f"y={y:.2f} > h({img_h})")
-                    is_out = True
-
-                if is_out:
-                    out_of_bound_count += 1
-                    affected_anns.add(ann_id)
-                    # 打印详细报错
-                    # index i//3 是第几个关键点
-                    print(
-                        f"⚠️ [越界] ImgID: {img_id:<6} | AnnID: {ann_id:<6} | KP_Idx: {i // 3:<2} | {', '.join(reason)}")
-
-    # 4. 总结报告
-    print("-" * 50)
-    print(f"扫描完成。")
-    print(f"📉 总关键点数: {total_kps}")
-    if out_of_bound_count > 0:
-        print(f"❌ 发现越界关键点: {out_of_bound_count} 个")
-        print(f"❌ 涉及标注条目数: {len(affected_anns)} 条")
-        print("\n💡 结论: 这些越界点如果位于图片右侧 (x > w)，")
-        print("   就会导致旧版逻辑算出 new_width = img_w - x = 负数。")
-    else:
-        print(f"✅ 完美: 所有可见关键点都在图片范围内 (0 ~ w, 0 ~ h)。")
+    save_name = 'bbox_verification.png'
+    plt.savefig(save_name)
+    print("-" * 40)
+    print(f"✅ 验证图已生成: {os.path.abspath(save_name)}")
+    print("👉 请打开图片：如果红框飞出去了，或者大得离谱，那就是格式错了！")
 
 
 if __name__ == "__main__":
-    # 填入你的文件路径，建议检查这一轮生成的 final 文件
-    files = [
-        "ldpose_test.json",
-        "labels_test_final.json",
-        "ldpose_train.json",
-        "labels_train_final.json",
-        "ldpose_val.json",
-        "labels_val_final.json",
-    ]
-
-    for f in files:
-        check_keypoints_bounds(f)
+    check_bbox()
