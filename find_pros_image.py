@@ -36,17 +36,22 @@ def process_prosthetic_images(json_path, source_img_dir, save_dir, expand_ratio=
         img_id = ann['image_id']
         ann_id = ann['id']
 
-        if not types or len(types) < 9:
+        if not types or len(types) < 11:
             continue
 
         # 检查是否含有假肢肘部
-        has_prosthetic_elbow = False
-        if types[7] == 1 and kps[7 * 3 + 2] > 0:
-            has_prosthetic_elbow = True
-        if not has_prosthetic_elbow and types[8] == 1 and kps[8 * 3 + 2] > 0:
-            has_prosthetic_elbow = True
+        target_indices = [7, 8, 9, 10]
 
-        if not has_prosthetic_elbow:
+        has_prosthetic_part = False
+
+        for idx in target_indices:
+            # 逻辑：类型为1 (假肢) 且 可见度 > 0
+            if types[idx] == 1 and kps[idx * 3 + 2] > 0:
+                has_prosthetic_part = True
+                break  # 只要找到一个符合的，就不需要继续找了，跳出循环
+
+        # 如果这 4 个点里一个假肢都没找到，就跳过这个标注
+        if not has_prosthetic_part:
             continue
 
         file_name = img_map.get(img_id)
@@ -115,7 +120,7 @@ def process_prosthetic_images(json_path, source_img_dir, save_dir, expand_ratio=
 if __name__ == "__main__":
     json_file = "labels_test_final.json"
     source_images = "./ldpose_final/ldpose_test"
-    output_folder = "prosthetic_elbow_dataset"
+    output_folder = "prosthetic_arm_dataset"
 
     # 在这里调整 expand_ratio，0.3 意味着框会更大一些
     process_prosthetic_images(json_file, source_images, output_folder, expand_ratio=0.3)
