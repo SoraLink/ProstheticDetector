@@ -1,48 +1,60 @@
 import os
+import time
 from icrawler.builtin import BaiduImageCrawler, BingImageCrawler
 
 
-def start_crawling(keyword, max_num=100):
-    # 创建保存路径
-    save_dir = f'./dataset_raw/{keyword}'
-    if not os.path.join(save_dir):
-        os.makedirs(save_dir, exist_ok=True)
+def start_crawling(keyword, max_num=500):
+    # 创建保存路径，自动处理文件夹不存在的情况
+    # 替换空格为下划线，避免文件夹名字有空格
+    safe_keyword = keyword.replace(" ", "_")
+    save_dir = os.path.join('.', 'dataset_raw', safe_keyword)
 
-    print(f"=== 开始爬取关键词: {keyword} ===")
+    if not os.path.exists(save_dir):
+        os.makedirs(save_dir)
 
-    # --- 1. 使用 Bing 爬虫 (通常质量较高) ---
-    print(f"正在从 Bing 爬取 {keyword}...")
-    bing_crawler = BingImageCrawler(
-        downloader_threads=2,  # 线程数
-        storage={'root_dir': save_dir}
-    )
-    bing_crawler.crawl(
-        keyword=keyword,
-        filters=None,
-        max_num=max_num,
-        file_idx_offset=0
-    )
+    print(f"=== 正在启动任务: {keyword} | 目标数量: {max_num} ===")
 
-    # --- 2. 使用 百度 爬虫 (作为补充) ---
-    # 注意：为了避免文件名冲突，这里可以设置不同的offset或单独文件夹，
-    # 但icrawler通常会自动重命名避免覆盖，或者你可以分两个文件夹存。
-    print(f"正在从 Baidu 爬取 {keyword}...")
-    baidu_crawler = BaiduImageCrawler(
-        downloader_threads=2,
-        storage={'root_dir': save_dir}
-    )
-    baidu_crawler.crawl(
-        keyword=keyword,
-        max_num=max_num,
-        file_idx_offset='auto'  # 自动接着编号
-    )
+    # --- 1. Bing 爬虫 (通常是主力) ---
+    try:
+        print(f"  -> [Bing] 正在爬取...")
+        bing_crawler = BingImageCrawler(
+            downloader_threads=4,  # 4线程通常比较稳
+            storage={'root_dir': save_dir},
+            log_level='ERROR'  # 减少控制台刷屏，只显示错误
+        )
+        bing_crawler.crawl(
+            keyword=keyword,
+            filters=None,
+            max_num=max_num,
+            file_idx_offset='auto'  # 自动接着编号，防止覆盖
+        )
+    except Exception as e:
+        print(f"  !! [Bing] 出错: {e}")
+
+    # --- 2. Baidu 爬虫 (作为补充) ---
+    # 如果觉得Bing够用了，可以把下面这段注释掉
+    try:
+        print(f"  -> [Baidu] 正在爬取...")
+        baidu_crawler = BaiduImageCrawler(
+            downloader_threads=4,
+            storage={'root_dir': save_dir},
+            log_level='ERROR'
+        )
+        baidu_crawler.crawl(
+            keyword=keyword,
+            max_num=max_num,
+            file_idx_offset='auto'
+        )
+    except Exception as e:
+        print(f"  !! [Baidu] 出错: {e}")
+
+    print(f"=== {keyword} 完成. 休息 2 秒防止封IP ===\n")
+    time.sleep(2)  # 简单的防封策略
 
 
 if __name__ == '__main__':
-    # 核心策略：关键词多样化
-    # 单一的"假肢"会爬到很多假肢产品的电商白底图，这不是你想要的。
-    # 你需要的是"人戴着假肢"的场景图。
 
+    # 纯净版多语言关键词列表 (侧重生活化、时尚、日常)
     keywords = [
         # --- 中文 ---
         "残疾人 假肢 生活照", "穿戴假肢 行走",
@@ -88,14 +100,12 @@ if __name__ == '__main__':
         "vida de amputado", "mulher com prótese", "prótese perna dia a dia"
     ]
 
-    # 每个关键词爬取的数量
-    images_per_keyword = 500
+    # 全局设置：每个关键词爬 500 张
+    IMAGES_PER_KEYWORD = 200
+
+    print(f"即将开始爬取 {len(keywords)} 组关键词，每组 {IMAGES_PER_KEYWORD} 张...")
 
     for kw in keywords:
-        try:
-            start_crawling(kw, max_num=images_per_keyword)
-        except Exception as e:
-            print(f"爬取 {kw} 时发生错误: {e}")
-            continue
+        start_crawling(kw, max_num=IMAGES_PER_KEYWORD)
 
-    print("=== 所有爬取任务完成 ===")
+    print("\n\n所有任务全部完成！请检查 dataset_raw 文件夹。")
