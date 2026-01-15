@@ -68,10 +68,13 @@ class ImageViewer:
         valid_extensions = ('.jpg', '.jpeg', '.png', '.bmp', '.gif', '.webp')
 
         # 获取所有图片并排序
-        self.image_list = [
-            f for f in os.listdir(path)
-            if f.lower().endswith(valid_extensions)
-        ]
+        self.image_list = []
+        for root_dir, _, files in os.walk(path):
+            for file in files:
+                if file.lower().endswith(valid_extensions):
+                    full_path = os.path.join(root_dir, file)
+                    full_path = os.path.normpath(full_path)
+                    self.image_list.append(full_path)
         self.image_list.sort()  # 按文件名排序
 
         if not self.image_list:

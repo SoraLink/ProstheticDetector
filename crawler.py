@@ -56,48 +56,64 @@ if __name__ == '__main__':
 
     # 纯净版多语言关键词列表 (侧重生活化、时尚、日常)
     keywords = [
-        # --- 中文 ---
-        "残疾人 假肢 生活照", "穿戴假肢 行走",
-        "下肢假肢 穿搭", "假肢 穿牛仔裤", "假肢 穿裙子",
-        "上肢假肢 写字", "仿生手 拿东西",
-        "假肢模特 街拍", "截肢 康复 走路",
-
+        # ==========================================
+        # 1. 核心词：强调“人”和“生活状态” (避免白底产品图)
+        # ==========================================
         # --- English ---
-        "amputee daily life", "person with prosthetic leg walking",
-        "prosthetic arm working", "amputee cooking",
-        "amputee fashion model", "prosthetic leg street style",
-        "woman with prosthetic leg dress", "man with prosthetic leg shorts",
-        "bionic arm user at home", "prosthetic limb casual wear",
+        "upper limb amputee daily life",  # 上肢截肢者 日常
+        "person with prosthetic arm",  # 带着假肢臂的人
+        "woman with bionic arm",  # 戴仿生手的女性 (女性图片通常露肤度高，结构清晰)
+        "man with prosthetic hand",  # 戴假肢手的男性
+        "prosthetic arm selfie",  # 假肢自拍 (这种图通常距离近，细节好)
+        "amputee arm model",  # 上肢模特
 
-        # --- Japanese ---
-        "義足 私服", "義足 モデル",
-        "義足 日常生活", "義手 働く", "切断 おしゃれ",
+        # --- 中文 ---
+        "上肢假肢 生活照",
+        "断臂 假肢",
+        "仿生手 佩戴",
+        "机械手 假肢 帅气",  # “帅气”经常能搜到高质量的赛博朋克风真人照
+        "独臂女孩 生活",
+        "安装假肢手",
 
-        # --- Korean ---
-        "의족 패션", "의족 일상", "의수 착용",
-        "절단 장애인 모델", "의족 스커트", "의족 반바지",
+        # ==========================================
+        # 2. 动作特写类 (Action - 非常适合训练手部抓取)
+        # ==========================================
+        "prosthetic hand holding cup",  # 假肢拿杯子
+        "prosthetic hand typing",  # 假肢打字
+        "prosthetic hand driving",  # 假肢开车
+        "bionic hand gripping",  # 仿生手抓取
+        "prosthetic arm eating",  # 用假肢吃饭
+        "shaking hands with prosthesis",  # 握手 (交互场景)
+        "義手 料理",  # (日) 义手 做饭
+        "義手 書く",  # (日) 义手 写字
 
-        # --- Traditional Chinese ---
-        "穿戴義肢 生活", "截肢者 日常", "義肢 穿搭",
-        "義肢 女孩", "科技義肢 行走", "截肢 復健 生活",
+        # ==========================================
+        # 3. 专业/解剖术语 (搜出来的图最精准)
+        # ==========================================
+        "trans-radial amputee",  # 前臂截肢 (最常见的手部假肢形态)
+        "trans-humeral amputee",  # 上臂截肢 (包含肘关节)
+        "below elbow prosthesis",  # 肘下假肢
+        "above elbow prosthesis",  # 肘上假肢
+        "body powered hook prosthesis",  # 机械挂钩 (这种很常见，必须包含，否则数据不全)
+        "myoelectric hand user",  # 肌电手用户
 
-        # --- German ---
-        "Beinprothese Alltag", "Armprothese greifen",
-        "Menschen mit Prothese", "Prothese unter Kleidung",
-        "Oberschenkelprothese gehen",
+        # ==========================================
+        # 4. 多语言补充 (日/德/俄 - 手部假肢大国)
+        # ==========================================
+        # --- Japanese (日本的义手文化很强，很多漫画家/艺术家带义手) ---
+        "義手 女子",  # 义手 女生
+        "義手 製作",  # 义手 制作 (会有佩戴测试图)
+        "能動義手",  # 机械义手 (那种带线缆的)
+        "筋電義手",  # 肌电义手
 
-        # --- Spanish ---
-        "vida diaria amputado", "mujer con prótesis",
-        "hombre con prótesis caminando", "prótesis de pierna ropa casual",
+        # --- German (德国Ottobock是老巢) ---
+        "Armprothese Alltag",  # 手臂假肢 日常
+        "Armamputation Prothese",  # 手臂截肢 假肢
+        "bionische hand",  # 仿生手
 
         # --- Russian ---
-        "протез ноги в быту", "девушка с протезом", "киберрука",
-
-        # --- French ---
-        "prothèse de jambe mode", "vivre avec une prothèse", "femme amputée rue",
-
-        # --- Portuguese ---
-        "vida de amputado", "mulher com prótese", "prótese perna dia a dia"
+        "бионическая рука",  # 仿生手臂
+        "протез руки киберпанк"  # 手臂假肢 赛博朋克 (俄语圈很流行这种改装风格)
     ]
 
     # 全局设置：每个关键词爬 500 张
