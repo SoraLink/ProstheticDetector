@@ -1,40 +1,54 @@
 import os
 import time
+import shutil  # 用于移动文件
+import requests
 from icrawler.builtin import BaiduImageCrawler, BingImageCrawler
+from selenium import webdriver
+from selenium.common import StaleElementReferenceException
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
+from simple_image_download import simple_image_download
+from webdriver_manager.chrome import ChromeDriverManager
+from selenium.webdriver.common.by import By
+
+# ================= 配置区 =================
+# 图片保存根目录
+ROOT_DIR = '/DATA/dataset_raw'
+# 每个引擎最大下载数 (全局统一控制)
+MAX_NUM = 500
 
 
-def start_crawling(keyword, max_num=500):
-    # 创建保存路径，自动处理文件夹不存在的情况
-    # 替换空格为下划线，避免文件夹名字有空格
+# =========================================
+
+def start_crawling(keyword, driver):
+    # 1. 准备路径 (空格转下划线)
     safe_keyword = keyword.replace(" ", "_")
-    save_dir = os.path.join('.', 'dataset_raw', safe_keyword)
+    save_dir = os.path.join(ROOT_DIR, safe_keyword)
 
     if not os.path.exists(save_dir):
         os.makedirs(save_dir)
 
-    print(f"=== 正在启动任务: {keyword} | 目标数量: {max_num} ===")
+    print(f"\n{'=' * 30}\n🚀 启动任务: [{keyword}]\n📂 目标路径: {save_dir}\n{'=' * 30}")
 
-    # --- 1. Bing 爬虫 (通常是主力) ---
+    # --- 1. Bing 爬虫 ---
     try:
-        print(f"  -> [Bing] 正在爬取...")
+        print(f"  -> [Bing] 正在搜索...")
         bing_crawler = BingImageCrawler(
-            downloader_threads=4,  # 4线程通常比较稳
+            downloader_threads=4,
             storage={'root_dir': save_dir},
-            log_level='ERROR'  # 减少控制台刷屏，只显示错误
+            log_level='ERROR'
         )
         bing_crawler.crawl(
             keyword=keyword,
-            filters=None,
-            max_num=max_num,
-            file_idx_offset='auto'  # 自动接着编号，防止覆盖
+            max_num=MAX_NUM,  # 这里用了 MAX_NUM
+            file_idx_offset='auto'
         )
     except Exception as e:
         print(f"  !! [Bing] 出错: {e}")
 
-    # --- 2. Baidu 爬虫 (作为补充) ---
-    # 如果觉得Bing够用了，可以把下面这段注释掉
+    # --- 2. Baidu 爬虫 ---
     try:
-        print(f"  -> [Baidu] 正在爬取...")
+        print(f"  -> [Baidu] 正在搜索...")
         baidu_crawler = BaiduImageCrawler(
             downloader_threads=4,
             storage={'root_dir': save_dir},
@@ -42,86 +56,171 @@ def start_crawling(keyword, max_num=500):
         )
         baidu_crawler.crawl(
             keyword=keyword,
-            max_num=max_num,
+            max_num=MAX_NUM,  # 这里用了 MAX_NUM
             file_idx_offset='auto'
         )
     except Exception as e:
         print(f"  !! [Baidu] 出错: {e}")
 
-    print(f"=== {keyword} 完成. 休息 2 秒防止封IP ===\n")
-    time.sleep(2)  # 简单的防封策略
+    # --- 3. Google 爬虫 ---
+    # try:
+    #     print(f"  -> [Google] 正在搜索...")
+    #     downloader = simple_image_download.simple_image_download
+    #
+    #     # 下载 (使用 MAX_NUM)
+    #     downloader().download(keyword, limit=MAX_NUM)
+    #
+    #     # 移动并改名
+    #     src_dir = os.path.join(os.getcwd(), 'simple_images', keyword)
+    #
+    #     if os.path.exists(src_dir):
+    #         print(f"  -> [Google] 正在移动并重命名文件...")
+    #         files = os.listdir(src_dir)
+    #         for f in files:
+    #             src_file = os.path.join(src_dir, f)
+    #             dst_file = os.path.join(save_dir, f"google_{f}")
+    #             shutil.move(src_file, dst_file)
+    #
+    #         shutil.rmtree(src_dir)
+    #         try:
+    #             shutil.rmtree(os.path.join(os.getcwd(), 'simple_images'))
+    #         except:
+    #             pass
+    #     else:
+    #         print(f"  ⚠️ [Google] 未找到临时目录，请手动检查")
+    #
+    # except Exception as e:
+    #     print(f"  !! [Google] 出错: {e}")
+
+    # --- 4. Pinterest 爬虫 ---
+    try:
+        print(f"  -> [Pinterest] 正在搜索...")
+        driver.get(f"https://www.pinterest.com/search/pins/?q={keyword}")
+        time.sleep(5)
+
+        image_urls = set()  # 用集合去重，存的全是字符串(URL)，字符串永远不会过期
+        print("     正在采集图片链接...")
+
+        # 动态计算滚动次数
+        scroll_times = int(MAX_NUM / 10) + 10
+
+        for s in range(scroll_times):
+            # 1. 如果已经抓够了，直接跳出循环，不再浪费时间滚动
+            if len(image_urls) >= MAX_NUM:
+                print(f"     ✅ 链接收集完毕 ({len(image_urls)}个)，停止滚动。")
+                break
+
+            # 2. 滚动页面
+            driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+            time.sleep(2)  # 稍微快一点
+
+            # 3. 【核心修改】抓到一个是一个，立刻提取字符串
+            try:
+                imgs = driver.find_elements(By.TAG_NAME, "img")
+                for img in imgs:
+                    try:
+                        # 拿到 src 字符串立刻存起来，不要保留 img 对象
+                        src = img.get_attribute("src")
+                        if src and "236x" in src:
+                            hd_src = src.replace("236x", "564x")  # 换成高清图
+                            image_urls.add(hd_src)
+
+                        # 如果这一个循环里已经够了，也可以提前停
+                        if len(image_urls) >= MAX_NUM:
+                            break
+                    except StaleElementReferenceException:
+                        # 如果这个元素刚好过期了，直接跳过看下一个，绝不报错
+                        continue
+            except:
+                pass
+
+            # 实时显示进度
+            if s % 2 == 0:
+                print(f"     已锁定链接: {len(image_urls)} / {MAX_NUM}")
+
+        # --- 4. 批量下载 (这是最稳的，因为链接都在手上了，哪怕断网都不怕丢进度) ---
+        print(f"     📥 [Pinterest] 开始极速下载 {min(len(image_urls), MAX_NUM)} 张...")
+
+        download_count = 0
+        for i, url in enumerate(list(image_urls)):
+            if download_count >= MAX_NUM:
+                break
+
+            try:
+                # 给个3秒超时，下不动就跳过，保证速度
+                resp = requests.get(url, timeout=3)
+                if resp.status_code == 200:
+                    file_name = f"pin_{i}.jpg"
+                    file_path = os.path.join(save_dir, file_name)
+                    with open(file_path, 'wb') as f:
+                        f.write(resp.content)
+                    download_count += 1
+            except:
+                pass
+
+        print(f"     [Pinterest] 实际下载成功: {download_count} 张")
+
+    except Exception as e:
+        print(f"  !! [Pinterest] 出错: {e}")
+
+    print(f"✅ {keyword} 处理完成.\n")
+    time.sleep(1)
 
 
 if __name__ == '__main__':
 
-    # 纯净版多语言关键词列表 (侧重生活化、时尚、日常)
-    keywords = [
-        # ==========================================
-        # 1. 核心词：强调“人”和“生活状态” (避免白底产品图)
-        # ==========================================
-        # --- English ---
-        "upper limb amputee daily life",  # 上肢截肢者 日常
-        "person with prosthetic arm",  # 带着假肢臂的人
-        "woman with bionic arm",  # 戴仿生手的女性 (女性图片通常露肤度高，结构清晰)
-        "man with prosthetic hand",  # 戴假肢手的男性
-        "prosthetic arm selfie",  # 假肢自拍 (这种图通常距离近，细节好)
-        "amputee arm model",  # 上肢模特
-
-        # --- 中文 ---
-        "上肢假肢 生活照",
-        "断臂 假肢",
-        "仿生手 佩戴",
-        "机械手 假肢 帅气",  # “帅气”经常能搜到高质量的赛博朋克风真人照
-        "独臂女孩 生活",
-        "安装假肢手",
-
-        # ==========================================
-        # 2. 动作特写类 (Action - 非常适合训练手部抓取)
-        # ==========================================
-        "prosthetic hand holding cup",  # 假肢拿杯子
-        "prosthetic hand typing",  # 假肢打字
-        "prosthetic hand driving",  # 假肢开车
-        "bionic hand gripping",  # 仿生手抓取
-        "prosthetic arm eating",  # 用假肢吃饭
-        "shaking hands with prosthesis",  # 握手 (交互场景)
-        "義手 料理",  # (日) 义手 做饭
-        "義手 書く",  # (日) 义手 写字
-
-        # ==========================================
-        # 3. 专业/解剖术语 (搜出来的图最精准)
-        # ==========================================
-        "trans-radial amputee",  # 前臂截肢 (最常见的手部假肢形态)
-        "trans-humeral amputee",  # 上臂截肢 (包含肘关节)
-        "below elbow prosthesis",  # 肘下假肢
-        "above elbow prosthesis",  # 肘上假肢
-        "body powered hook prosthesis",  # 机械挂钩 (这种很常见，必须包含，否则数据不全)
-        "myoelectric hand user",  # 肌电手用户
-
-        # ==========================================
-        # 4. 多语言补充 (日/德/俄 - 手部假肢大国)
-        # ==========================================
-        # --- Japanese (日本的义手文化很强，很多漫画家/艺术家带义手) ---
-        "義手 女子",  # 义手 女生
-        "義手 製作",  # 义手 制作 (会有佩戴测试图)
-        "能動義手",  # 机械义手 (那种带线缆的)
-        "筋電義手",  # 肌电义手
-
-        # --- German (德国Ottobock是老巢) ---
-        "Armprothese Alltag",  # 手臂假肢 日常
-        "Armamputation Prothese",  # 手臂截肢 假肢
-        "bionische hand",  # 仿生手
-
-        # --- Russian ---
-        "бионическая рука",  # 仿生手臂
-        "протез руки киберпанк"  # 手臂假肢 赛博朋克 (俄语圈很流行这种改装风格)
+    # 你的关键词列表
+    english_keywords = [
+        "person with prosthetic arm",
+        "upper limb amputee",
+        "woman with prosthetic arm",
+        "man with prosthetic arm",
+        "prosthetic arm user",
+        "wearing a prosthetic arm",
+        "person with bionic arm",
+        "amputee arm model",
+        "person with artificial arm",
     ]
 
-    # 全局设置：每个关键词爬 500 张
-    IMAGES_PER_KEYWORD = 200
+    other_languages_map = {
+        "zh": ["戴假肢的人", "戴假肢的男性", "戴假肢的女性", "佩戴上肢假肢", "戴仿生手的人"],
+        "fr": ["personne avec une prothèse de bras", "homme avec une prothèse de bras",
+               "femme avec une prothèse de bras", "portant une prothèse de bras", "personne avec un bras bionique"],
+        "uk": ["людина з протезом руки", "чоловік з протезом руки", "жінка з протезом руки", "носити протез руки",
+               "людина з біонічним протезом"],
+        "ja": ["義手の人", "義手の男性", "義手の女性", "義手を装着している", "バイオニックアームの人"],
+        "ru": ["человек с протезом руки", "мужчина с протезом руки", "женщина с протезом руки", "ношение протеза руки",
+               "человек с бионической рукой"],
+        "de": ["Person mit Armprothese", "Mann mit Armprothese", "Frau mit Armprothese", "Armprothese tragen",
+               "Person mit bionischem Arm"],
+        "es": ["persona con prótesis de brazo", "hombre con prótesis de brazo", "mujer con prótesis de brazo",
+               "usando prótesis de brazo", "persona con brazo biónico"]
+    }
 
-    print(f"即将开始爬取 {len(keywords)} 组关键词，每组 {IMAGES_PER_KEYWORD} 张...")
+    search_keywords = []
+    search_keywords.extend(english_keywords)
+    for lang, words in other_languages_map.items():
+        search_keywords.extend(words)
 
-    for kw in keywords:
-        start_crawling(kw, max_num=IMAGES_PER_KEYWORD)
+    # 浏览器配置
+    opts = Options()
+    opts.add_argument("--headless")
+    opts.add_argument("--disable-gpu")
+    opts.add_argument("--no-sandbox")
+    opts.add_argument(
+        "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36")
 
-    print("\n\n所有任务全部完成！请检查 dataset_raw 文件夹。")
+    print(f"即将开始爬取 {len(search_keywords)} 组关键词，每组目标 {MAX_NUM} 张...")
+
+    driver = None
+    try:
+        driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=opts)
+
+        for kw in search_keywords:
+            start_crawling(kw, driver)
+
+        driver.quit()
+        print("\n🎉🎉 所有任务全部完成！请检查 /DATA/dataset_raw 文件夹。")
+
+    except Exception as e:
+        print(f"❌ 浏览器或主程序出错: {e}")

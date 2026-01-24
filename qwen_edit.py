@@ -1,94 +1,109 @@
 import torch
 import os
 from PIL import Image
-from diffusers import QwenImageEditPlusPipeline, QwenImageTransformer2DModel
-from transformers import BitsAndBytesConfig
+from diffusers import QwenImageEditPlusPipeline
 
-# ================= 配置区 =================
+# ================= 🔧 配置区 =================
 model_id = "Qwen/Qwen-Image-Edit-2511"
 
-# 输入文件夹路径 (请确保这个路径是正确的)
-input_folder = "./prosthetic_arm_element_refined"
-# 输出保存路径 (自动创建)
-output_folder = "./results_output"
+# 文件夹路径
+input_folder = "/DATA/dataset_raw/"  # 请把你的原图放在这里
+output_root = "/DATA/qwen_generated/"  # 结果会自动保存在这里
 
-# Prompt 设置 (保持你的要求)
-prompt = "Create a full-body photograph of an amputee person wearing the exact prosthetic arm from the input image. The prosthesis retained its exact appearance and texture, but is repositioned into a new, dynamic angle. Ensure a photorealistic, natural connection between the stump and the device."
-negative_prompt = "altered prosthesis, modified design, changed texture, messy connection, fake looking stump, plastic look, bad anatomy, blurred details, extra limbs, missing limbs, cropped image"
+# 阶段 1：补全全身 (让模型在当前画幅内重绘为全身)
+# 注意：我微调了 Prompt，去掉了 "downwards" 这种方位词，让模型自由发挥
+expand_prompt = "Expand this partial photo into a complete, full-body portrait."
 
-# 引导系数 (建议稍微调高一点，因为你的指令很复杂，要求全身且不改假肢)
+# 阶段 2：姿势列表
+pose_prompts = []
+
+# 负面提示词
+negative_prompt = "altered prosthesis, modified design, changed texture, messy connection, fake looking stump, plastic look, bad anatomy, blurred details, extra limbs, missing limbs, cropped image, deformed hands, blurry face, ugly, low quality, distortion"
+
 guidance_scale_value = 7.5
-# =========================================
+# ============================================
 
-# 0. 创建输出目录
-os.makedirs(output_folder, exist_ok=True)
+print("📦 正在以 bfloat16 精度加载模型 (启用 Sequential CPU Offload)...")
 
-print("🚀 正在准备 8-bit 量化配置...")
-
-# 1. 定义 8-bit 量化配置
-# 注意：你代码里写的是 load_in_8bit=True，所以我把注释里的 4-bit 改成了 8-bit 以免混淆
-quant_config = BitsAndBytesConfig(
-    load_in_8bit=True,
-    bnb_8bit_compute_dtype=torch.bfloat16
-)
-
-print("📦 正在加载 Transformer (8-bit 量化版)...")
-
-# 2. 单独加载 Transformer 并应用量化
-# 模型加载必须放在循环外面，否则每张图都要重新加载模型，会极其慢
-transformer = QwenImageTransformer2DModel.from_pretrained(
-    model_id,
-    subfolder="transformer",
-    quantization_config=quant_config,
-    torch_dtype=torch.bfloat16
-)
-
-print("🔗 正在组装完整 Pipeline...")
-
-# 3. 加载 Pipeline
 pipeline = QwenImageEditPlusPipeline.from_pretrained(
     model_id,
-    transformer=transformer,
     torch_dtype=torch.bfloat16,
-    device_map="balanced"
+    use_safetensors=True
 )
+# 显存优化
+pipeline.enable_sequential_cpu_offload()
 
-print("✅ 模型加载完成，准备开始批量处理...")
+print("✅ 模型加载完成！开始流水线处理...")
 
-# 4. 开始循环处理文件夹中的图片
-# 支持的图片格式
-supported_extensions = ('.png', '.jpg', '.jpeg', '.webp', '.bmp')
+# ================= 🔄 主循环逻辑 =================
 
-# 获取文件夹内所有文件并排序（防止乱序）
-file_list = sorted(os.listdir(input_folder))
+os.makedirs(output_root, exist_ok=True)
+supported_exts = ('.jpg', '.jpeg', '.png', '.webp')
 
-for filename in file_list:
-    # 检查是否是图片文件
-    if filename.lower().endswith(supported_extensions):
-        input_path = os.path.join(input_folder, filename)
-        output_filename = f"gen_{filename}"  # 生成的文件名前加个 gen_
-        output_path = os.path.join(output_folder, output_filename)
+# 检查输入文件夹是否存在
+if not os.path.exists(input_folder):
+    os.makedirs(input_folder)
+    print(f"⚠️ 输入文件夹 {input_folder} 不存在，已自动创建。请放入图片后重新运行。")
+    exit()
 
-        print(f"🎨 正在处理: {filename} ...")
+files = [f for f in os.listdir(input_folder) if f.lower().endswith(supported_exts)]
+print(f"📂 发现 {len(files)} 张图片待处理。")
 
-        try:
-            # 打开图片
-            image = Image.open(input_path).convert("RGB")
+for idx, filename in enumerate(files):
+    file_path = os.path.join(input_folder, filename)
+    file_name_no_ext = os.path.splitext(filename)[0]
 
-            # 生成
-            output = pipeline(
-                image=image,
-                prompt=prompt,
-                negative_prompt=negative_prompt,
-                num_inference_steps=30,
-                guidance_scale=guidance_scale_value,
-            ).images[0]
+    # 创建每张图的专属输出目录
+    current_output_dir = os.path.join(output_root, file_name_no_ext)
+    if os.path.exists(current_output_dir):
+        continue
 
-            # 保存结果
-            output.save(output_path)
-            print(f"   ✅ 已保存到: {output_path}")
+    os.makedirs(current_output_dir, exist_ok=True)
 
-        except Exception as e:
-            print(f"   ❌ 处理 {filename} 时出错: {e}")
+    print(f"\n[{idx + 1}/{len(files)}] 正在处理: {filename}")
 
-print("\n🎉 所有图片处理完成！")
+    try:
+        # === load image ===
+        original_image = Image.open(file_path).convert("RGB")
+
+        # -------------------------------------------------
+        # Step 1: 生成全身照 (Base Full Body)
+        # -------------------------------------------------
+        print("   🔹 Step 1: 正在生成全身照基准图...")
+
+        full_body_image = pipeline(
+            image=original_image,
+            prompt=expand_prompt,
+            negative_prompt=negative_prompt,
+            num_inference_steps=30,
+            guidance_scale=guidance_scale_value,
+        ).images[0]
+
+        # 保存这一步的结果，作为下一步的输入
+        base_save_path = os.path.join(current_output_dir, "01_full_body_base.jpg")
+        full_body_image.save(base_save_path)
+        print(f"      ✅ 基准全身照已保存")
+
+        # -------------------------------------------------
+        # Step 2: 基于全身照生成多姿势 (Pose Variations)
+        # -------------------------------------------------
+        print("   🔸 Step 2: 正在生成姿势变体...")
+
+        # for p_idx, pose_prompt in enumerate(pose_prompts):
+        #     print(f"      Running Pose {p_idx + 1}...")
+        #
+        #     pose_image = pipeline(
+        #         image=full_body_image,  # 【关键】这里用的是刚刚生成的全身照，不是原图
+        #         prompt=pose_prompt,
+        #         negative_prompt=negative_prompt,
+        #         num_inference_steps=50,
+        #         guidance_scale=guidance_scale_value,
+        #     ).images[0]
+        #
+        #     pose_save_path = os.path.join(current_output_dir, f"02_pose_{p_idx + 1}.jpg")
+        #     pose_image.save(pose_save_path)
+
+    except Exception as e:
+        print(f"   ❌ 处理图片 {filename} 时发生错误: {e}")
+
+print("\n🎉 所有任务处理完成！")

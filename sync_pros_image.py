@@ -86,7 +86,6 @@ def transfer_prosthetic_arm(client, source_path, target_path, output_path):
     ]
 
     try:
-        # print(f"  正在请求 API (Target: {target_path.name})...") # 注释掉以减少刷屏
         response = client.models.generate_content(
             model=MODEL_ID,
             contents=contents_list,
