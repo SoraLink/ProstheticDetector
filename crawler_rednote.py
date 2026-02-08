@@ -1,114 +1,133 @@
 import os
 import time
-import random
+import re
 import requests
-import pandas as pd
 from DrissionPage import ChromiumPage
+from tqdm import tqdm
 
-# --- 配置区 ---
-KEYWORD = '戴假肢'
-TARGET_COUNT = 1000
-SAVE_DIR = 'XHS_Data'
+# --- 配置 ---
+SAVE_DIR = 'XHS_Manual_Selected'
+if not os.path.exists(SAVE_DIR): os.makedirs(SAVE_DIR)
 
 
-class XHSSpider:
-    def __init__(self):
-        self.page = ChromiumPage()
-        self.headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Referer': 'https://www.xiaohongshu.com/'
-        }
-        if not os.path.exists(SAVE_DIR): os.makedirs(SAVE_DIR)
+def download_file_with_bar(url, folder, name, desc="下载中"):
+    """带进度条的下载工具"""
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Referer': 'https://www.xiaohongshu.com/'
+    }
+    file_path = os.path.join(folder, name)
+    try:
+        response = requests.get(url, headers=headers, stream=True, timeout=20)
+        total_size = int(response.headers.get('content-length', 0))
+        # 如果文件小于 1KB，可能是假文件
+        if total_size < 1000: return False
 
-    def download(self, url, folder, name):
+        with tqdm(total=total_size, unit='iB', unit_scale=True, desc=desc, ncols=80) as bar:
+            with open(file_path, 'wb') as file:
+                for data in response.iter_content(1024):
+                    bar.update(len(data))
+                    file.write(data)
+        return True
+    except Exception as e:
+        print(f"   ❌ 下载失败: {e}")
+        return False
+
+
+def clean_filename(text):
+    """清洗文件名，防止 Windows 报错"""
+    return re.sub(r'[\\/:*?"<>|]', '_', text)[:50]  # 限制长度防止溢出
+
+
+def start_sniffer():
+    page = ChromiumPage()
+
+    # --- 核心：开启数据包监听 ---
+    # 我们只监听包含 'web/v1/feed' 的数据包，这是小红书加载笔记详情的 API
+    page.listen.start('web/v1/feed')
+
+    print("🚀 【监听模式】辅助程序已启动！")
+    print("------------------------------------------------")
+    print("操作指南：")
+    print("1. 在浏览器搜索『假肢』，必须先登录！")
+    print("2. 随意点击你感兴趣的笔记（点开弹窗）。")
+    print("3. 程序会自动捕获数据包并下载，不需要等页面渲染。")
+    print("------------------------------------------------")
+
+    # 记录已处理的笔记 ID，防止重复下载同一篇
+    processed_ids = set()
+
+    # 循环监听网络流
+    for packet in page.listen.steps():
         try:
-            res = requests.get(url, headers=self.headers, timeout=10)
-            if res.status_code == 200:
-                with open(os.path.join(folder, name), 'wb') as f:
-                    f.write(res.content)
-        except:
+            # 获取数据包中的 JSON 内容
+            response = packet.response.body
+
+            # 确保数据结构正确
+            if not isinstance(response, dict) or 'data' not in response:
+                continue
+
+            items = response.get('data', {}).get('items', [])
+            if not items: continue
+
+            # 通常点击一个笔记，API 会返回这个笔记的详细信息
+            for item in items:
+                # 提取核心数据
+                note_card = item.get('note_card', {})
+                note_id = item.get('id') or item.get('note_id')
+
+                # 如果这个 ID 已经处理过，或者是无效数据，跳过
+                if not note_id or note_id in processed_ids:
+                    continue
+
+                title = note_card.get('title', '无标题')
+                user_name = note_card.get('user', {}).get('nickname', '未知作者')
+                desc = note_card.get('desc', '')  # 如果你需要文字描述，可以在这里保存
+
+                print(f"\n📡 捕获到笔记: [{title}] - 作者: {user_name}")
+
+                # 创建文件夹
+                safe_title = clean_filename(title)
+                folder = os.path.join(SAVE_DIR, f"{note_id}_{safe_title}")
+                if not os.path.exists(folder): os.makedirs(folder)
+
+                processed_ids.add(note_id)  # 标记为已处理
+
+                # --- 1. 处理视频 ---
+                # 在 JSON 里，视频地址通常是 masterUrl，绝对不是 blob
+                video_info = note_card.get('video', {})
+                media_info = video_info.get('media', {}).get('stream', {}).get('h264', [])
+
+                if media_info:
+                    # 获取最高清晰度 (masterUrl)
+                    video_url = media_info[0].get('masterUrl')
+                    if video_url:
+                        print(f"   🎥 发现视频，开始下载...")
+                        download_file_with_bar(video_url, folder, "video.mp4", desc="视频进度")
+
+                # --- 2. 处理图片 ---
+                image_list = note_card.get('image_list', [])
+                if image_list:
+                    print(f"   🖼️ 发现 {len(image_list)} 张图片...")
+                    for idx, img in enumerate(image_list):
+                        # 优先尝试获取原图 URL (通常在 info_list 或 url_default)
+                        img_url = img.get('url_default', '') or img.get('url', '')
+
+                        # 小红书原图 trick: 确保 url 指向高清
+                        if 'spectrum' in img_url:
+                            # 有时候 JSON 里的 url 是压缩过的，这里不做替换也行，通常 API 返回的已经很清楚了
+                            pass
+
+                        if img_url:
+                            download_file_with_bar(img_url, folder, f"img_{idx}.jpg", desc=f"图 {idx + 1}")
+
+                print(f"✅ 处理完成！请继续点击下一个。")
+
+        except Exception as e:
+            # 忽略一些解析错误，保持程序运行
+            # print(e)
             pass
 
-    def get_list(self):
-        print(f"开始搜索关键词: {KEYWORD}")
-        self.page.get(f'https://www.xiaohongshu.com/search_result?keyword={KEYWORD}')
 
-        # 核心修改：等待页面首批数据加载出来，超时时间15秒
-        if self.page.wait.ele_displayed('.note-item', timeout=15):
-            print("页面加载成功，开始提取...")
-        else:
-            print("页面加载超时，请检查是否需要扫码登录或网络是否通畅")
-            return []
-
-        note_urls = set()
-        while len(note_urls) < TARGET_COUNT:
-            # 获取当前所有笔记卡片
-            items = self.page.eles('.note-item')
-
-            for item in items:
-                try:
-                    # 增加判断：只有找到 a 标签才提取 href
-                    a_target = item.ele('tag:a', timeout=2)  # 缩短单个查找超时
-                    if a_target:
-                        link = a_target.attr('href')
-                        if link and 'explore' in link:  # 确保是笔记链接
-                            note_urls.add(link)
-                except Exception:
-                    continue  # 某个卡片坏了就跳过，不报错
-
-                if len(note_urls) >= TARGET_COUNT: break
-
-            print(f"已收集链接: {len(note_urls)} / {TARGET_COUNT}")
-
-            # 滚动并等待新内容加载
-            self.page.scroll.to_bottom()
-            time.sleep(random.uniform(2, 4))
-
-            # 检查是否有滑动验证码
-            if self.page.ele('text=验证码'):
-                print("检测到验证码，请在浏览器中手动完成！")
-                while self.page.ele('text=验证码'):
-                    time.sleep(2)
-
-        return list(note_urls)
-
-    def parse_and_download(self, url):
-        """第二步：进入详情页下载媒体资源"""
-        self.page.get(url)
-        time.sleep(random.uniform(2, 4))
-
-        try:
-            title = self.page.ele('.title').text[:15] or "未命名"
-            note_id = url.split('/')[-1]
-            folder = os.path.join(SAVE_DIR, f"{note_id}_{title}")
-            if not os.path.exists(folder): os.makedirs(folder)
-
-            # 解析视频
-            video = self.page.ele('tag:video')
-            if video:
-                v_url = video.attr('src')
-                print(f"下载视频: {title}")
-                self.download(v_url, folder, "video.mp4")
-
-            # 解析图片
-            imgs = self.page.eles('.pic')
-            for i, img in enumerate(imgs):
-                i_url = img.attr('src')
-                if i_url:
-                    self.download(i_url, folder, f"img_{i}.jpg")
-        except Exception as e:
-            print(f"解析失败: {url}, 错误: {e}")
-
-    def run(self):
-        urls = self.get_list()
-        for i, url in enumerate(urls):
-            print(f"正在处理第 {i + 1}/{len(urls)} 个笔记...")
-            self.parse_and_download(url)
-            # 每下载5个休息一下，防止封IP
-            if i % 5 == 0: time.sleep(random.uniform(5, 10))
-
-
-# --- 启动 ---
 if __name__ == '__main__':
-    spider = XHSSpider()
-    spider.run()
+    start_sniffer()
