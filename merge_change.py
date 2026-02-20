@@ -135,8 +135,8 @@ def merge_with_priority(source_json_path, input_dir, output_file, master_filenam
 
 # ================= 配置区域 =================
 if __name__ == "__main__":
-    SOURCE_JSON_PATH = "./labels_residual_fix/labels_test_fix_residual_kpts.json"
-    INPUT_DIR = "./test"
+    SOURCE_JSON_PATH = "./train/labels_train_fix_residual_kpts.json"
+    INPUT_DIR = "./train"
     OUTPUT_FILE = "./test/merged_final.json"
 
     # 指定哪个文件是“老大”，它的数据绝对不会被覆盖

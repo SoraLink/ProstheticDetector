@@ -49,32 +49,40 @@ def merge_residual_points_by_id(ldpose_path, new_ann_path, output_path):
 
         # 你的新标注数据
         dst_kps = user_ann['keypoints']
+        dst_types = user_ann['keypoint_types']
 
         # 补齐长度检查
         if len(dst_kps) < 93:  # 31 * 3
             raise ValueError(f'dst_kps not enough length for ID {ann_id}')
 
+        if not dst_types or len(dst_types) < 31:
+            raise ValueError(f'keypoint_types 缺失或长度不足 for ID {ann_id}')
+
         # ==========================================
         # 核心修改: 按肢体组 (Limb) 进行遍历
         # ==========================================
         for group in limb_groups:
-            # 1. 检查 New 文件中，这个肢体是否已经有了残肢点？
-            # 只要组内有一个点是可见的 (v > 0)，就视为该肢体已有标注
-            limb_has_new_annotation = False
-            for new_idx in group:
-                v_index = new_idx * 3 + 2
-                if dst_kps[v_index] > 0:
-                    limb_has_new_annotation = True
-                    break
+            idx_a, idx_b = group[0], group[1]
 
-            # 2. 如果新文件里这个肢体已经有点了，绝对不碰它（尊重你的修改）
-            if limb_has_new_annotation:
+            # 获取两个点的可见度 (v)
+            v_a = dst_kps[idx_a * 3 + 2]
+            v_b = dst_kps[idx_b * 3 + 2]
+
+            # 获取两个点的类型 (type)
+            t_a = dst_types[idx_a]
+            t_b = dst_types[idx_b]
+
+            # 核心判断：验证是否真正存在有效的残肢点 (vis == 2 且 type == 0)
+            valid_a = (v_a in [1, 2] and t_a == 0)
+            valid_b = (v_b in [1, 2] and t_b == 0)
+
+            # 如果这个 limb 上有任何一个合法的残肢点，禁止拷贝，直接跳过
+            if valid_a or valid_b:
                 continue
 
-            # 3. 如果新文件里这个肢体是空的，才去查旧文件
+            # 否则（即两个点都不满足 valid 条件），去旧文件查数据并补上
             for new_idx in group:
-                old_idx = new_idx - 6  # 23 -> 17
-
+                old_idx = new_idx - 6  # 偏移量 23 -> 17
                 src_base = old_idx * 3
                 dst_base = new_idx * 3
 
@@ -82,13 +90,14 @@ def merge_residual_points_by_id(ldpose_path, new_ann_path, output_path):
 
                 # 如果旧文件里这个点存在
                 if s_v > 0:
-                    # 复制坐标和可见性
-                    dst_kps[dst_base] = src_kps[src_base]  # x
-                    dst_kps[dst_base + 1] = src_kps[src_base + 1]  # y
-                    dst_kps[dst_base + 2] = src_kps[src_base + 2]  # v
+                    dst_kps[dst_base] = src_kps[src_base]  # 拷 x
+                    dst_kps[dst_base + 1] = src_kps[src_base + 1]  # 拷 y
+                    dst_kps[dst_base + 2] = src_kps[src_base + 2]  # 拷 v
+
+                    # 【重要】同步更新 type 为 0，确保数据一致性
+                    dst_types[new_idx] = 0
+
                     update_count += 1
-                    # 一个肢体通常只有一个残肢点，找到一个复制完其实就可以 break group 了
-                    # 但为了保险（万一旧数据有两个点这种脏数据），让它跑完这个 group 也可以
 
         # 保存回对象
         user_ann['keypoints'] = dst_kps
@@ -107,9 +116,9 @@ def merge_residual_points_by_id(ldpose_path, new_ann_path, output_path):
 # ==========================================
 # 路径配置
 # ==========================================
-LDP_FILE = "./ldpose_final/annotations/ldpose_test.json"
-NEW_FILE = "./labels_test31.json"
-OUT_FILE = "labels_residual_fix/labels_test_fix_residual_kpts.json"
+LDP_FILE = "./train/labels_train_fix_residual_kpts.json"
+NEW_FILE = "./train/train_coco_annotation_merged.json"
+OUT_FILE = "./train/train_coco_annotation_fix_residual_kpts.json"
 
 if __name__ == "__main__":
     # 确保输出目录存在

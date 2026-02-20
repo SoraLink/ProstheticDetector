@@ -577,6 +577,35 @@ class LabelerApp:
                 if child_data['type'] == 1:
                     child_data['type'] = 0
 
+    def _goto_id(self):
+        """根据 Annotation 的真实 ID 进行全量搜索跳转"""
+        try:
+            target_id_str = self.id_entry.get().strip()
+            if not target_id_str: return
+
+            target_id = int(target_id_str)
+            found_idx = -1
+
+            # 在任务列表中遍历寻找匹配的 ID
+            for idx, ann in enumerate(self.data_mgr.task_list):
+                if ann.get('id') == target_id:
+                    found_idx = idx
+                    break
+
+            if found_idx != -1:
+                # 保存当前状态并跳转
+                self.data_mgr.save_current_state(self.current_index, self.runtime_kps, self.is_deleted)
+                self.current_index = found_idx
+                self._load_current_scene()
+                # 提示一下找到了
+                self.id_entry.config(bg="#e8f5e9")  # 成功变绿
+                self.master.after(1000, lambda: self.id_entry.config(bg="white"))
+            else:
+                messagebox.showwarning("未找到", f"在当前数据集中找不到 ID 为 {target_id} 的标注。")
+                self.id_entry.config(bg="#ffebee")  # 失败变红
+        except ValueError:
+            messagebox.showerror("错误", "请输入有效的数字 ID。")
+
     def _update_residual_visibility(self):
         RES_TO_ALL_CHILDREN = {
             "L-Elbow-Res-Above": ["left_elbow", "left_wrist", "L_Middle_Tip"],
@@ -630,7 +659,7 @@ class LabelerApp:
         self.raw_image = ImageOps.exif_transpose(Image.open(ctx['full_path']).convert("RGB"))
 
         # =========================================================
-        # 1. 先加载原始数据 (Original JSON)
+        # 1. 加载原始数据
         # =========================================================
         self.runtime_kps = {}
         ann, f_kps, f_t = ctx['original_ann'], ctx['original_ann'].get('keypoints', []), ctx['original_ann'].get(
@@ -644,36 +673,45 @@ class LabelerApp:
             self.runtime_kps[name] = {"x": x, "y": y, "v": int(v), "type": int(t)}
 
         # =========================================================
-        # 2. 【关键修正】: 只修复原始数据里的幽灵点
-        #    在加载你的修改记录之前，先把原始数据的 BUG 修好
+        # 2. 【精准狙击修复】只修复有坐标的 Missing 点
         # =========================================================
-        for kp_name in Config.RES_KPS:
-            if kp_name in self.runtime_kps:
-                kp_data = self.runtime_kps[kp_name]
-                # 如果原始数据里：可见(v>0) 却是 Missing(2)，这肯定是之前脚本的BUG
-                if kp_data['v'] > 0 and kp_data['type'] == 2:
-                    print(f"Auto-fixing ORIGINAL data {kp_name}: Visible but Missing -> Force set to Normal")
-                    kp_data['type'] = 0
+        if not self.is_deleted:
+            for kp_name in Config.RES_KPS:
+                if kp_name in self.runtime_kps:
+                    kp_data = self.runtime_kps[kp_name]
+
+                    # 只有同时满足以下三个条件，才会被判定为 BUG 并修复：
+                    # 1. 可见 (v > 0)
+                    # 2. 类型是 Missing (type == 2)
+                    # 3. 【核心条件】坐标不是 (0,0) -> 说明它物理上存在！
+                    if kp_data['v'] > 0 and kp_data['type'] == 2:
+                        if kp_data['x'] > 1 or kp_data['y'] > 1:
+                            print(
+                                f"Auto-fixing {kp_name}: Has coordinates ({kp_data['x']:.1f}, {kp_data['y']:.1f}) but Type=Missing -> Force Normal")
+                            kp_data['type'] = 0
 
         # =========================================================
-        # 3. 再加载你的修改记录 (Delta Changes)
-        #    你的修改拥有最高优先级，会覆盖上面的修复
+        # 3. 加载 Delta 修改 (你的手动修改永远是最高优先级)
         # =========================================================
         if ctx['changes']:
             if "__DELETED__" in ctx['changes']:
                 pass
             else:
                 for k, v in ctx['changes'].items():
-                    # 这里的 v 是 [x, y, vis, type]
                     if k in self.runtime_kps:
                         self.runtime_kps[k] = {"x": v[0], "y": v[1], "v": v[2], "type": v[3]}
 
         self.is_deleted = ctx.get('is_deleted', False)
 
         # =========================================================
-        # 4. 后处理：反向 Vis 修正 (仅用于辅助显示逻辑，不改 Type)
+        # 4. 后处理
         # =========================================================
         if not self.is_deleted:
+            for res_kp_name in Config.RES_KPS:
+                if res_kp_name in self.runtime_kps:
+                    kp_data = self.runtime_kps[res_kp_name]
+                    if kp_data['v'] > 0 and kp_data['type'] == 0:
+                        self._auto_update_prosthesis(trigger_kp=res_kp_name)
             self._update_residual_visibility()
 
         self.scale = min(1150 / self.raw_image.size[0], 850 / self.raw_image.size[1], 1.0)
