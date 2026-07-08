@@ -7,10 +7,10 @@ import threading
 
 # ================= 配置区域 =================
 # 请替换为你实际的文件夹路径
-DIR_CRAWLER = "E:\DATA\elbow\elbow"  # 待清洗的爬虫数据
-DIR_TRAIN = "E:\DATA\elbow\elbow_round1"  # 训练集
-DIR_VAL = "E:\DATA\elbow\elbow_round2"  # 验证集
-DIR_TEST = "E:\DATA\elbow\elbow_round3"  # 测试集
+DIR_CRAWLER = "/DATA/knee_round1"  # 待清洗的爬虫数据
+DIR_TRAIN = "/DATA/knee"  # 训练集
+DIR_VAL = "/DATA/knee"  # 验证集
+DIR_TEST = "/DATA/knee"  # 测试集
 
 # 相似度阈值 (越小越严格，5是推荐值)
 THRESHOLD = 5

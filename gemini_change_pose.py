@@ -9,16 +9,16 @@ from google import genai
 from google.genai import types
 
 # === 配置区域 (已完全还原) ===
-# os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "key.json"
+os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "key.json"
 PROJECT_ID = "project-fe4de98f-5478-4cee-b84"
 LOCATION = "global"  # 还原为 global
 
-SOURCE_DIR = "/DATA/full_body_images"
-OUTPUT_DIR = "/DATA/full_body_images_change_pose_round3"
+SOURCE_DIR = "/DATA/knee"
+OUTPUT_DIR = "/DATA/knee_round1"
 VALID_EXTS = {'.jpg', '.jpeg', '.png', '.bmp', '.webp', '.tiff'}
 
 # Model ID (还原为你原本使用的模型)
-MODEL_ID = 'gemini-3-pro-image-preview'
+MODEL_ID = 'gemini-2.5-flash-image'
 
 
 def get_mime_type(file_path):
